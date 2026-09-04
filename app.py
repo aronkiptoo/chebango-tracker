@@ -1,24 +1,48 @@
 """
-Chebango Tracker - Fixed Version (handles corrupted stock.json)
+Chebango Tracker - Supabase-backed Version (persistent storage)
+Mobile-responsive UI with logo branding + Multi-product issuance
 """
 
 import streamlit as st
 import pandas as pd
 from datetime import datetime
 import os
-import json
-from io import BytesIO
 import base64
+from io import BytesIO
 import streamlit.components.v1 as components
+from PIL import Image
+from supabase import create_client, Client
+
+# ---------- SUPABASE CLIENT ----------
+@st.cache_resource
+def get_supabase_client() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+supabase = get_supabase_client()
+
+# ---------- LOGO ----------
+LOGO_PATH = "chebango_logo.png"  # keep this file in the same folder as app.py
+
+def get_logo_image():
+    if os.path.exists(LOGO_PATH):
+        try:
+            return Image.open(LOGO_PATH)
+        except Exception:
+            return None
+    return None
+
+logo_img = get_logo_image()
 
 st.set_page_config(
     page_title="Chebango Tracker",
-    page_icon="🌱",
+    page_icon=logo_img if logo_img else "🌱",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ---------- CSS ----------
+# ---------- CSS (mobile-responsive + centered) ----------
 st.markdown("""
 <style>
     .stApp { background-color: #f4f1e8; }
@@ -27,6 +51,15 @@ st.markdown("""
     [data-testid="stMetricValue"] { color: #1b4332 !important; font-weight: 700 !important; }
     [data-testid="stMetricLabel"] { color: #1b4332 !important; font-weight: 600 !important; }
     h1, h2, h3, p, label, .stMarkdown { color: #1b4332 !important; }
+    
+    /* Center main content */
+    .block-container {
+        max-width: 1100px !important;
+        padding-left: 2rem !important;
+        padding-right: 2rem !important;
+        margin: 0 auto !important;
+    }
+
     .stButton > button {
         background-color: #ffffff;
         color: #1b4332 !important;
@@ -39,23 +72,38 @@ st.markdown("""
         border: 2px solid #1b4332;
         color: #1b4332 !important;
     }
-    @media print {
-        .stApp > header, .stSidebar, .stButton, .stRadio, 
-        .stFileUploader, .stCameraInput, .stSelectbox, 
-        .stTextInput, .stNumberInput, .stForm {
-            display: none !important;
+    .sidebar-logo-wrap { display: flex; justify-content: center; padding: 6px 0 14px 0; }
+    .sidebar-logo-wrap img { max-width: 150px; width: 100%; height: auto; border-radius: 6px; background: #fff; padding: 6px; }
+    .login-logo-wrap { display: flex; justify-content: center; margin-bottom: 10px; }
+    .login-logo-wrap img { max-width: 240px; width: 70%; height: auto; }
+
+    @media (max-width: 768px) {
+        .block-container { 
+            padding-left: 0.8rem !important; 
+            padding-right: 0.8rem !important; 
+            padding-top: 1rem !important; 
+            max-width: 100% !important;
         }
+        h1 { font-size: 1.45rem !important; }
+        h2 { font-size: 1.2rem !important; }
+        h3 { font-size: 1.05rem !important; }
+        p, label, .stMarkdown, .stCaption { font-size: 0.92rem !important; }
+        [data-testid="stMetricValue"] { font-size: 1.35rem !important; }
+        [data-testid="stMetricLabel"] { font-size: 0.85rem !important; }
+        .stButton > button { font-size: 0.95rem !important; padding: 0.6rem 0.5rem !important; width: 100% !important; }
+        .stTextInput input, .stNumberInput input, .stSelectbox, .stTextArea textarea { font-size: 0.95rem !important; }
+        [data-testid="stDataFrame"] { overflow-x: auto !important; }
+        .login-logo-wrap img { max-width: 190px; width: 60%; }
+        .sidebar-logo-wrap img { max-width: 110px; }
+    }
+
+    @media print {
+        .stApp > header, .stSidebar, .stButton, .stRadio,
+        .stFileUploader, .stCameraInput, .stSelectbox,
+        .stTextInput, .stNumberInput, .stForm { display: none !important; }
     }
 </style>
 """, unsafe_allow_html=True)
-
-# ---------- PATHS ----------
-DATA_DIR = "data"
-STOCK_FILE = os.path.join(DATA_DIR, "stock.json")
-FARMERS_FILE = os.path.join(DATA_DIR, "farmers.csv")
-USERS_FILE = os.path.join(DATA_DIR, "users.json")
-
-os.makedirs(DATA_DIR, exist_ok=True)
 
 # ---------- PRODUCTS ----------
 PRODUCTS = [
@@ -66,100 +114,96 @@ PRODUCTS = [
     "Flower Dust (5kg Bag)"
 ]
 
-# ---------- HELPERS ----------
+# ---------- LOGO HELPERS ----------
+def logo_base64():
+    if os.path.exists(LOGO_PATH):
+        try:
+            with open(LOGO_PATH, "rb") as f:
+                return base64.b64encode(f.read()).decode()
+        except Exception:
+            return None
+    return None
+
+LOGO_B64 = logo_base64()
+
+def render_login_logo():
+    if LOGO_B64:
+        st.markdown(f'<div class="login-logo-wrap"><img src="data:image/png;base64,{LOGO_B64}"></div>', unsafe_allow_html=True)
+    else:
+        st.markdown("### 🌱 Chebango Tracker")
+
+def render_sidebar_logo():
+    if LOGO_B64:
+        st.markdown(f'<div class="sidebar-logo-wrap"><img src="data:image/png;base64,{LOGO_B64}"></div>', unsafe_allow_html=True)
+
+# ---------- SUPABASE DATA HELPERS ----------
 def load_users():
-    default_users = {
-        "254701593581": {
-            "password": "1234",
-            "name": "Caroline Cherotich",
-            "department": "Accountant",
-            "must_change_password": True
-        },
-        "254724334842": {
-            "password": "1234",
-            "name": "Too Patrick",
-            "department": "Field Manager",
-            "must_change_password": True
-        },
-        "254769468742": {
-            "password": "1234",
-            "name": "Aron Yegon",
-            "department": "ICT",
-            "must_change_password": True
-        }
-    }
-    if not os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "w") as f:
-            json.dump(default_users, f, indent=2)
-        return default_users
-    try:
-        with open(USERS_FILE, "r") as f:
-            users = json.load(f)
-        first_user = next(iter(users.values()))
-        if "department" not in first_user:
-            with open(USERS_FILE, "w") as f:
-                json.dump(default_users, f, indent=2)
-            return default_users
-        return users
-    except:
-        with open(USERS_FILE, "w") as f:
-            json.dump(default_users, f, indent=2)
-        return default_users
+    res = supabase.table("users").select("*").execute()
+    rows = res.data or []
+    return {r["mobile"]: r for r in rows}
 
 
-def save_users(users):
-    with open(USERS_FILE, "w") as f:
-        json.dump(users, f, indent=2)
+def update_user_password(mobile, new_password):
+    supabase.table("users").update({
+        "password": new_password,
+        "must_change_password": False
+    }).eq("mobile", mobile).execute()
 
 
 def load_stock():
-    """Safe loader - recreates stock.json if it is missing or corrupted"""
-    default_stock = {p: {"received": 0, "issued": 0, "available": 0} for p in PRODUCTS}
-
-    if not os.path.exists(STOCK_FILE):
-        with open(STOCK_FILE, "w") as f:
-            json.dump(default_stock, f, indent=2)
-        return default_stock
-
-    try:
-        with open(STOCK_FILE, "r") as f:
-            content = f.read().strip()
-            if not content:          # empty file
-                raise ValueError("Empty file")
-            stock = json.loads(content)
-
-            # Make sure all products exist
-            for p in PRODUCTS:
-                if p not in stock:
-                    stock[p] = {"received": 0, "issued": 0, "available": 0}
-            return stock
-    except Exception:
-        # File is corrupted → recreate it
-        with open(STOCK_FILE, "w") as f:
-            json.dump(default_stock, f, indent=2)
-        return default_stock
+    res = supabase.table("stock").select("*").execute()
+    rows = res.data or []
+    stock = {r["product"]: {"received": r["received"], "issued": r["issued"], "available": r["available"]} for r in rows}
+    for p in PRODUCTS:
+        if p not in stock:
+            stock[p] = {"received": 0, "issued": 0, "available": 0}
+    return stock
 
 
-def save_stock(stock):
-    with open(STOCK_FILE, "w") as f:
-        json.dump(stock, f, indent=2)
+def save_stock_row(product, values):
+    supabase.table("stock").upsert({
+        "product": product,
+        "received": values["received"],
+        "issued": values["issued"],
+        "available": values["available"]
+    }).execute()
 
 
 def load_farmers():
-    if not os.path.exists(FARMERS_FILE):
-        df = pd.DataFrame(columns=[
+    res = supabase.table("farmers").select("*").order("id", desc=False).execute()
+    rows = res.data or []
+    if not rows:
+        return pd.DataFrame(columns=[
             "Receipt_No", "Date", "Time", "Farmer_Name", "Grower_Number", "ID_Number", "Mobile",
             "Product", "Quantity", "Issued_By", "Department", "Issuer_Mobile"
         ])
-        df.to_csv(FARMERS_FILE, index=False)
-        return df
-    return pd.read_csv(FARMERS_FILE)
+    df = pd.DataFrame(rows)
+    rename_map = {
+        "receipt_no": "Receipt_No", "date": "Date", "time": "Time", "farmer_name": "Farmer_Name",
+        "grower_number": "Grower_Number", "id_number": "ID_Number", "mobile": "Mobile",
+        "product": "Product", "quantity": "Quantity", "issued_by": "Issued_By",
+        "department": "Department", "issuer_mobile": "Issuer_Mobile"
+    }
+    df = df.rename(columns=rename_map)
+    keep_cols = list(rename_map.values())
+    return df[[c for c in keep_cols if c in df.columns]]
 
 
 def save_farmer(record):
-    df = load_farmers()
-    df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
-    df.to_csv(FARMERS_FILE, index=False)
+    supabase.table("farmers").insert({
+        "receipt_no": record["Receipt_No"],
+        "date": record["Date"],
+        "time": record["Time"],
+        "farmer_name": record["Farmer_Name"],
+        "grower_number": record["Grower_Number"],
+        "id_number": record["ID_Number"],
+        "mobile": record["Mobile"],
+        "product": record["Product"],
+        "quantity": record["Quantity"],
+        "issued_by": record["Issued_By"],
+        "department": record["Department"],
+        "issuer_mobile": record["Issuer_Mobile"]
+    }).execute()
 
 
 def image_to_base64(uploaded_file):
@@ -169,7 +213,7 @@ def image_to_base64(uploaded_file):
         bytes_data = uploaded_file.getvalue()
         b64 = base64.b64encode(bytes_data).decode()
         return f"data:image/jpeg;base64,{b64}"
-    except:
+    except Exception:
         return None
 
 
@@ -180,6 +224,8 @@ if "user" not in st.session_state:
     st.session_state.user = None
 if "last_receipt" not in st.session_state:
     st.session_state.last_receipt = None
+if "issue_items" not in st.session_state:
+    st.session_state.issue_items = []
 
 
 # ---------- LOGIN ----------
@@ -187,10 +233,11 @@ def show_login():
     st.markdown("<br>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1, 1.5, 1])
     with col2:
+        render_login_logo()
         st.markdown("""
         <div style="text-align:center; margin-bottom:20px;">
-            <h1 style="color:#27ae60;">🌱 Chebango Tracker</h1>
-            <p>Product Issuance & Stock System</p>
+            <h1 style="color:#27ae60;">Chebango Tracker</h1>
+            <p>Product Issuance &amp; Stock System</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -216,9 +263,9 @@ def show_login():
                     st.error("Invalid mobile number or password.")
 
         st.info("""
-        **Default Password = 1234**  
-        • Caroline Cherotich (Accountant) → `254701593581`  
-        • Too Patrick (Field Manager) → `254724334842`  
+        **Default Password = 1234** (unless already changed)
+        • Caroline Cherotich (Accountant) → `254701593581`
+        • Too Patrick (Field Manager) → `254724334842`
         • Aron Yegon (ICT) → `254769468742`
         """)
 
@@ -230,10 +277,7 @@ def show_change_password():
         confirm = st.text_input("Confirm New Password", type="password")
         if st.form_submit_button("Change Password"):
             if new_pwd and new_pwd == confirm:
-                users = load_users()
-                users[st.session_state.user["mobile"]]["password"] = new_pwd
-                users[st.session_state.user["mobile"]]["must_change_password"] = False
-                save_users(users)
+                update_user_password(st.session_state.user["mobile"], new_pwd)
                 st.session_state.user["must_change_password"] = False
                 st.success("Password changed successfully!")
                 st.rerun()
@@ -243,9 +287,10 @@ def show_change_password():
 
 def show_sidebar():
     with st.sidebar:
+        render_sidebar_logo()
         st.markdown("""
-        <div style="padding:10px 0; border-bottom:1px solid #34495e; margin-bottom:15px;">
-            <h2 style="color:#27ae60; margin:0;">🌱 Chebango</h2>
+        <div style="padding:10px 0; border-bottom:1px solid #34495e; margin-bottom:15px; text-align:center;">
+            <h2 style="color:#27ae60; margin:0;">Chebango</h2>
             <p style="color:#bdc3c7; font-size:13px;">Tracker System</p>
         </div>
         """, unsafe_allow_html=True)
@@ -269,6 +314,7 @@ def show_sidebar():
         if st.button("🚪 Logout", use_container_width=True):
             st.session_state.logged_in = False
             st.session_state.user = None
+            st.session_state.issue_items = []
             st.rerun()
         return menu
 
@@ -294,7 +340,7 @@ def page_receive_stock():
         if st.form_submit_button("✅ Confirm Receive Stock", use_container_width=True):
             stock[product]["received"] += quantity
             stock[product]["available"] += quantity
-            save_stock(stock)
+            save_stock_row(product, stock[product])
             st.success(f"Received **{quantity}** of **{product}**")
             st.balloons()
 
@@ -302,7 +348,7 @@ def page_receive_stock():
 def page_view_stock():
     st.title("📊 View Stock")
     stock = load_stock()
-    data = [{"Product": p, "Received": v["received"], "Issued": v["issued"], "Available": v["available"]} 
+    data = [{"Product": p, "Received": v["received"], "Issued": v["issued"], "Available": v["available"]}
             for p, v in stock.items()]
     st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
     total = sum(v["available"] for v in stock.values())
@@ -313,60 +359,111 @@ def page_issue_to_farmer():
     st.title("👨‍🌾 Issue Product to Farmer")
     stock = load_stock()
     available_products = [p for p in PRODUCTS if stock[p]["available"] > 0]
-    
+
     if not available_products:
         st.error("No stock available. Please receive stock first.")
         return
 
-    with st.form("issue_form", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            farmer_name = st.text_input("Name of the Farmer *")
-            grower_number = st.text_input("Grower Number *")
-            id_number = st.text_input("ID Number *")
-        with col2:
-            mobile = st.text_input("Mobile Number *")
-            product = st.selectbox("Select Product *", available_products)
-            quantity = st.number_input("Quantity to Issue *", min_value=1, 
-                                      max_value=stock[product]["available"], value=1)
+    st.markdown("### Farmer Details")
+    col1, col2 = st.columns(2)
+    with col1:
+        farmer_name = st.text_input("Name of the Farmer *", key="farmer_name")
+        grower_number = st.text_input("Grower Number *", key="grower_number")
+        id_number = st.text_input("ID Number *", key="id_number")
+    with col2:
+        mobile = st.text_input("Mobile Number *", key="mobile")
 
-        st.markdown("### ID Capture")
-        st.caption("Choose Camera or Upload for both Front and Back")
+    st.markdown("---")
+    st.markdown("### Products to Issue")
 
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown("**ID Front**")
-            front_method = st.radio("Front Method", ["📷 Camera", "📁 Upload"], 
-                                    key="front_method", horizontal=True, label_visibility="collapsed")
-            if front_method == "📷 Camera":
-                id_front = st.camera_input("Take ID Front", key="cam_front")
+    # Show currently added products
+    if st.session_state.issue_items:
+        st.write("**Selected Products:**")
+        for i, item in enumerate(st.session_state.issue_items):
+            col_a, col_b, col_c = st.columns([5, 2, 1])
+            with col_a:
+                st.write(f"• **{item['product']}**")
+            with col_b:
+                st.write(f"Qty: **{item['quantity']}**")
+            with col_c:
+                if st.button("🗑️", key=f"remove_{i}"):
+                    st.session_state.issue_items.pop(i)
+                    st.rerun()
+
+    # Add new product section
+    with st.expander("➕ Add Product", expanded=True):
+        col_p, col_q = st.columns([3, 1])
+        with col_p:
+            product = st.selectbox("Select Product", available_products, key="add_product")
+        with col_q:
+            max_qty = stock[product]["available"]
+            # Reduce max_qty by already selected quantity of same product
+            already_selected = sum(item["quantity"] for item in st.session_state.issue_items if item["product"] == product)
+            max_qty = max(1, max_qty - already_selected)
+            quantity = st.number_input("Quantity", min_value=1, max_value=max_qty, value=1, key="add_qty")
+
+        if st.button("➕ Add to List", use_container_width=True):
+            existing = next((item for item in st.session_state.issue_items if item["product"] == product), None)
+            if existing:
+                st.warning(f"**{product}** is already in the list. Remove it first if you want to change the quantity.")
             else:
-                id_front = st.file_uploader("Upload ID Front", type=["jpg","jpeg","png"], key="up_front")
+                st.session_state.issue_items.append({
+                    "product": product,
+                    "quantity": quantity
+                })
+                st.success(f"Added **{quantity}** × {product}")
+                st.rerun()
 
-        with col_b:
-            st.markdown("**ID Back**")
-            back_method = st.radio("Back Method", ["📷 Camera", "📁 Upload"], 
-                                   key="back_method", horizontal=True, label_visibility="collapsed")
-            if back_method == "📷 Camera":
-                id_back = st.camera_input("Take ID Back", key="cam_back")
-            else:
-                id_back = st.file_uploader("Upload ID Back", type=["jpg","jpeg","png"], key="up_back")
+    st.markdown("---")
+    st.markdown("### ID Capture")
+    st.caption("Choose Camera or Upload for both Front and Back")
 
-        submitted = st.form_submit_button("✅ Issue Product & Generate Receipt", use_container_width=True)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**ID Front**")
+        front_method = st.radio("Front Method", ["📷 Camera", "📁 Upload"],
+                                key="front_method", horizontal=True, label_visibility="collapsed")
+        if front_method == "📷 Camera":
+            id_front = st.camera_input("Take ID Front", key="cam_front")
+        else:
+            id_front = st.file_uploader("Upload ID Front", type=["jpg", "jpeg", "png"], key="up_front")
 
-        if submitted:
-            if not farmer_name or not grower_number or not id_number or not mobile:
-                st.error("Please fill all required fields.")
-            else:
-                now = datetime.now()
-                receipt_no = f"{now.strftime('%y%m%d%H%M')}"
-                date_str = now.strftime("%d %b %Y %H:%M")
-                time_str = now.strftime("%H:%M:%S")
+    with col_b:
+        st.markdown("**ID Back**")
+        back_method = st.radio("Back Method", ["📷 Camera", "📁 Upload"],
+                               key="back_method", horizontal=True, label_visibility="collapsed")
+        if back_method == "📷 Camera":
+            id_back = st.camera_input("Take ID Back", key="cam_back")
+        else:
+            id_back = st.file_uploader("Upload ID Back", type=["jpg", "jpeg", "png"], key="up_back")
 
+    st.markdown("---")
+
+    # Final submit button
+    if st.button("✅ Issue All Products & Generate Receipt", type="primary", use_container_width=True):
+        if not farmer_name or not grower_number or not id_number or not mobile:
+            st.error("Please fill all farmer details.")
+        elif not st.session_state.issue_items:
+            st.error("Please add at least one product.")
+        else:
+            now = datetime.now()
+            receipt_no = f"{now.strftime('%y%m%d%H%M')}"
+            date_str = now.strftime("%d %b %Y %H:%M")
+            time_str = now.strftime("%H:%M:%S")
+
+            issued_products = []
+            total_qty = 0
+
+            for item in st.session_state.issue_items:
+                product = item["product"]
+                quantity = item["quantity"]
+
+                # Update stock
                 stock[product]["issued"] += quantity
                 stock[product]["available"] -= quantity
-                save_stock(stock)
+                save_stock_row(product, stock[product])
 
+                # Save farmer record
                 record = {
                     "Receipt_No": receipt_no,
                     "Date": now.strftime("%Y-%m-%d"),
@@ -383,65 +480,109 @@ def page_issue_to_farmer():
                 }
                 save_farmer(record)
 
-                st.session_state.last_receipt = {
-                    "receipt_no": receipt_no,
-                    "date_str": date_str,
-                    "time_str": time_str,
-                    "farmer_name": farmer_name,
-                    "grower_number": grower_number,
-                    "id_number": id_number,
-                    "mobile": mobile,
-                    "product": product,
-                    "quantity": quantity,
-                    "issued_by": st.session_state.user["name"],
-                    "department": st.session_state.user["department"],
-                    "issuer_mobile": st.session_state.user["mobile"],
-                    "id_front_b64": image_to_base64(id_front),
-                    "id_back_b64": image_to_base64(id_back)
-                }
+                issued_products.append(f"{quantity} × {product}")
+                total_qty += quantity
 
-                st.success("✅ Product issued successfully! Go to **Receipt** menu to view and print.")
-                st.balloons()
+            # Create receipt data
+            st.session_state.last_receipt = {
+                "receipt_no": receipt_no,
+                "date_str": date_str,
+                "time_str": time_str,
+                "farmer_name": farmer_name,
+                "grower_number": grower_number,
+                "id_number": id_number,
+                "mobile": mobile,
+                "product": " + ".join(issued_products),
+                "quantity": total_qty,
+                "issued_by": st.session_state.user["name"],
+                "department": st.session_state.user["department"],
+                "issuer_mobile": st.session_state.user["mobile"],
+                "id_front_b64": image_to_base64(id_front),
+                "id_back_b64": image_to_base64(id_back)
+            }
+
+            # Clear the list
+            st.session_state.issue_items = []
+
+            st.success("✅ All products issued successfully! Go to **Receipt** menu to view and print.")
+            st.balloons()
+            st.rerun()
 
 
 def render_professional_receipt(r):
     front_img = r.get("id_front_b64")
-    back_img  = r.get("id_back_b64")
+    back_img = r.get("id_back_b64")
 
-    front_html = f'<img src="{front_img}" style="max-width:260px; max-height:170px; border:1px solid #999;">' if front_img else '<div style="width:260px;height:150px;border:1px dashed #aaa;display:flex;align-items:center;justify-content:center;color:#888;font-size:13px;">No Front ID</div>'
-    back_html  = f'<img src="{back_img}"  style="max-width:260px; max-height:170px; border:1px solid #999;">' if back_img else '<div style="width:260px;height:150px;border:1px dashed #aaa;display:flex;align-items:center;justify-content:center;color:#888;font-size:13px;">No Back ID</div>'
+    front_html = f'<img src="{front_img}" style="max-width:100%; width:260px; max-height:170px; border:1px solid #999;">' if front_img else '<div style="width:100%;max-width:260px;height:150px;border:1px dashed #aaa;display:flex;align-items:center;justify-content:center;color:#888;font-size:13px;">No Front ID</div>'
+    back_html = f'<img src="{back_img}" style="max-width:100%; width:260px; max-height:170px; border:1px solid #999;">' if back_img else '<div style="width:100%;max-width:260px;height:150px;border:1px dashed #aaa;display:flex;align-items:center;justify-content:center;color:#888;font-size:13px;">No Back ID</div>'
+
+    logo_tag = f'<img src="data:image/png;base64,{LOGO_B64}" style="height:40px;">' if LOGO_B64 else ""
 
     details_rows = f"""
         <tr><td class="label">Farmer Name:</td><td>{r['farmer_name']}</td></tr>
         <tr><td class="label">ID Number:</td><td>{r['id_number']}</td></tr>
         <tr><td class="label">Grower Number:</td><td>{r['grower_number']}</td></tr>
-        <tr><td class="label">Product:</td><td>{r['product']}</td></tr>
-        <tr><td class="label">Quantity Issued:</td><td><b>{r['quantity']}</b></td></tr>
-        <tr><td class="label">Received By:</td><td>{r['issued_by']}</td></tr>
+        <tr><td class="label">Product(s):</td><td>{r['product']}</td></tr>
+        <tr><td class="label">Total Quantity:</td><td><b>{r['quantity']}</b></td></tr>
+        <tr><td class="label">Issued By:</td><td>{r['issued_by']}</td></tr>
         <tr><td class="label">Phone:</td><td>{r['issuer_mobile']}</td></tr>
     """
+
+    def receipt_block(copy_label):
+        return f"""
+        <div class="receipt-box">
+            <div class="header-row">
+                <div class="header-left">
+                    {logo_tag}
+                    <div>
+                        <div class="title">MINISTRY OF AGRICULTURE - PRODUCT DISTRIBUTION PROGRAM</div>
+                        <div class="factory">CHEBANGO TEA FACTORY</div>
+                    </div>
+                </div>
+                <div class="right-info">
+                    <div style="font-weight:bold;">{copy_label}</div>
+                    <div>Receipt No: {r['receipt_no']}</div>
+                    <div>Date: {r['date_str']}</div>
+                </div>
+            </div>
+            <table>{details_rows}</table>
+            <div class="signatures">
+                <div class="sign-box">Recipient Signature</div>
+                <div class="sign-box">Authorized Officer</div>
+            </div>
+        </div>
+        """
 
     html_content = f"""
     <!DOCTYPE html>
     <html>
     <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
             body {{ font-family: Arial, Helvetica, sans-serif; color: #000; margin: 0; padding: 10px; }}
             .id-section {{ text-align: center; margin-bottom: 12px; }}
             .id-section h3 {{ margin: 0 0 10px 0; font-size: 15px; letter-spacing: 1px; }}
-            .id-images {{ display: flex; justify-content: center; gap: 25px; }}
-            .receipt-box {{ border: 2px solid #1a7a3a; padding: 14px 18px; margin-bottom: 16px; border-radius: 3px; }}
-            .header-row {{ display: flex; justify-content: space-between; align-items: flex-start; }}
-            .title {{ font-weight: bold; font-size: 13.5px; }}
-            .factory {{ font-size: 12.5px; margin-top: 2px; }}
+            .id-images {{ display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; }}
+            .receipt-box {{ border: 2px solid #1a7a3a; padding: 14px 16px; margin-bottom: 16px; border-radius: 3px; }}
+            .header-row {{ display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 6px; }}
+            .header-left {{ display: flex; align-items: center; gap: 8px; }}
+            .title {{ font-weight: bold; font-size: 12.5px; }}
+            .factory {{ font-size: 12px; margin-top: 2px; }}
             .right-info {{ text-align: right; font-size: 12.5px; }}
             table {{ width: 100%; margin-top: 12px; font-size: 13px; border-collapse: collapse; }}
-            td {{ padding: 3px 0; }}
-            .label {{ width: 150px; font-weight: bold; }}
-            .signatures {{ display: flex; justify-content: space-between; margin-top: 32px; }}
-            .sign-box {{ width: 45%; text-align: center; border-top: 1px solid #333; padding-top: 5px; font-size: 11.5px; }}
+            td {{ padding: 3px 0; word-break: break-word; }}
+            .label {{ width: 130px; font-weight: bold; }}
+            .signatures {{ display: flex; flex-wrap: wrap; justify-content: space-between; margin-top: 28px; gap: 10px; }}
+            .sign-box {{ flex: 1 1 45%; min-width: 130px; text-align: center; border-top: 1px solid #333; padding-top: 5px; font-size: 11px; }}
             .footer {{ text-align: center; font-size: 11px; color: #555; margin-top: 14px; }}
             .dashed {{ border-top: 1.5px dashed #666; margin: 14px 0; }}
+            @media (max-width: 480px) {{
+                .label {{ width: 105px; font-size: 12px; }}
+                table {{ font-size: 12px; }}
+                .title {{ font-size: 11px; }}
+                .factory {{ font-size: 10.5px; }}
+                .right-info {{ font-size: 11px; }}
+            }}
         </style>
     </head>
     <body>
@@ -453,76 +594,16 @@ def render_professional_receipt(r):
             </div>
         </div>
         <hr style="border:none; border-top:1px solid #333; margin:12px 0;">
-
-        <!-- STORE RECEIPT -->
-        <div class="receipt-box">
-            <div class="header-row">
-                <div>
-                    <div class="title">MINISTRY OF AGRICULTURE - PRODUCT DISTRIBUTION PROGRAM</div>
-                    <div class="factory">CHEBANGO TEA FACTORY</div>
-                </div>
-                <div class="right-info">
-                    <div style="font-weight:bold;">STORE RECEIPT</div>
-                    <div>Receipt No: {r['receipt_no']}</div>
-                    <div>Date: {r['date_str']}</div>
-                </div>
-            </div>
-            <table>{details_rows}</table>
-            <div class="signatures">
-                <div class="sign-box">Recipient Signature</div>
-                <div class="sign-box">Authorized Officer</div>
-            </div>
-        </div>
-
+        {receipt_block("STORE RECEIPT")}
         <div class="dashed"></div>
-
-        <!-- GATE COPY -->
-        <div class="receipt-box">
-            <div class="header-row">
-                <div>
-                    <div class="title">MINISTRY OF AGRICULTURE - PRODUCT DISTRIBUTION PROGRAM</div>
-                    <div class="factory">CHEBANGO TEA FACTORY</div>
-                </div>
-                <div class="right-info">
-                    <div style="font-weight:bold;">GATE COPY</div>
-                    <div>Receipt No: {r['receipt_no']}</div>
-                    <div>Date: {r['date_str']}</div>
-                </div>
-            </div>
-            <table>{details_rows}</table>
-            <div class="signatures">
-                <div class="sign-box">Recipient Signature</div>
-                <div class="sign-box">Authorized Officer</div>
-            </div>
-        </div>
-
+        {receipt_block("GATE COPY")}
         <div class="dashed"></div>
-
-        <!-- FARMER COPY -->
-        <div class="receipt-box">
-            <div class="header-row">
-                <div>
-                    <div class="title">MINISTRY OF AGRICULTURE - PRODUCT DISTRIBUTION PROGRAM</div>
-                    <div class="factory">CHEBANGO TEA FACTORY</div>
-                </div>
-                <div class="right-info">
-                    <div style="font-weight:bold;">FARMER COPY</div>
-                    <div>Receipt No: {r['receipt_no']}</div>
-                    <div>Date: {r['date_str']}</div>
-                </div>
-            </div>
-            <table>{details_rows}</table>
-            <div class="signatures">
-                <div class="sign-box">Recipient Signature</div>
-                <div class="sign-box">Authorized Officer</div>
-            </div>
-        </div>
-
+        {receipt_block("FARMER COPY")}
         <p class="footer">This receipt number is traceable and secured. Keep the duplicate copy for your records.</p>
     </body>
     </html>
     """
-    components.html(html_content, height=1450, scrolling=True)
+    components.html(html_content, height=1550, scrolling=True)
 
 
 def page_receipt():
@@ -537,7 +618,7 @@ def page_receipt():
     st.success(f"Receipt No: **{r['receipt_no']}**  |  {r['date_str']}")
 
     if st.button("🖨️ PRINT RECEIPT", use_container_width=True):
-        st.info("Press **Ctrl + P** to print the receipt below.")
+        st.info("Press **Ctrl + P** (or use your phone's share/print option) to print the receipt below.")
 
     st.markdown("---")
     render_professional_receipt(r)
