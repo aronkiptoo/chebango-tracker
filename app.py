@@ -8,6 +8,8 @@ import pandas as pd
 from datetime import datetime
 import os
 import base64
+import random
+import string
 from io import BytesIO
 import streamlit.components.v1 as components
 from PIL import Image
@@ -268,6 +270,47 @@ def image_to_base64(uploaded_file):
         return None
 
 
+# ---------- REMOTE (PHONE) ID CAPTURE HELPERS ----------
+# Lets an officer generate a short code on the laptop, capture the farmer's
+# ID with a phone camera under that code, then pull the photos back into the
+# laptop session with a "Refresh" button — no need to physically use the
+# laptop's own camera.
+def generate_capture_code():
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+
+def load_id_capture(code):
+    """Fetch a pending remote capture by its code. Returns dict or None."""
+    if not code:
+        return None
+    try:
+        res = supabase.table("id_captures").select("*").eq("code", code).execute()
+        rows = res.data or []
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def save_id_capture(code, front_b64=None, back_b64=None):
+    """Upsert a remote capture, keeping whichever side was already uploaded."""
+    existing = load_id_capture(code) or {}
+    payload = {
+        "code": code,
+        "front_b64": front_b64 if front_b64 is not None else existing.get("front_b64"),
+        "back_b64": back_b64 if back_b64 is not None else existing.get("back_b64"),
+    }
+    supabase.table("id_captures").upsert(payload).execute()
+
+
+def delete_id_capture(code):
+    if not code:
+        return
+    try:
+        supabase.table("id_captures").delete().eq("code", code).execute()
+    except Exception:
+        pass
+
+
 # ---------- SESSION ----------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -279,6 +322,8 @@ if "issue_items" not in st.session_state:
     st.session_state.issue_items = []
 if "admin_unlocked" not in st.session_state:
     st.session_state.admin_unlocked = False
+if "capture_code" not in st.session_state:
+    st.session_state.capture_code = None
 
 
 # ---------- LOGIN ----------
@@ -358,6 +403,7 @@ def show_sidebar():
             "📦 Receive Stock",
             "📊 View Stock",
             "👨‍🌾 Issue to Farmer",
+            "📷 Remote ID Capture",
             "🧾 Receipt",
             "📋 Farmers List",
             "📄 Reports"
@@ -529,6 +575,41 @@ def page_manage_products():
         st.rerun()
 
 
+def page_remote_capture():
+    st.title("📷 Remote ID Capture")
+    st.caption("Use this on your phone: enter the code shown on the laptop's **Issue to Farmer** page, then capture the farmer's ID.")
+
+    code = st.text_input("Capture Code", placeholder="e.g. 7F3K9Q").strip().upper()
+    if not code:
+        st.info("Enter the code from the laptop to begin.")
+        return
+
+    st.markdown("---")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**ID Front**")
+        front = st.camera_input("Capture ID Front", key="remote_cam_front")
+        if front and st.button("⬆️ Upload Front", use_container_width=True, key="upload_front_btn"):
+            save_id_capture(code, front_b64=image_to_base64(front))
+            st.success("Front uploaded! Go back to the laptop and press '🔄 Refresh from Phone'.")
+            st.balloons()
+
+    with col2:
+        st.markdown("**ID Back**")
+        back = st.camera_input("Capture ID Back", key="remote_cam_back")
+        if back and st.button("⬆️ Upload Back", use_container_width=True, key="upload_back_btn"):
+            save_id_capture(code, back_b64=image_to_base64(back))
+            st.success("Back uploaded! Go back to the laptop and press '🔄 Refresh from Phone'.")
+            st.balloons()
+
+    st.markdown("---")
+    pending = load_id_capture(code)
+    if pending:
+        st.write("**Current upload status for this code:**")
+        st.write(f"Front: {'✅ Uploaded' if pending.get('front_b64') else '⏳ Not yet'}")
+        st.write(f"Back: {'✅ Uploaded' if pending.get('back_b64') else '⏳ Not yet'}")
+
+
 def page_issue_to_farmer():
     st.title("👨‍🌾 Issue Product to Farmer")
     stock = load_stock()
@@ -590,26 +671,77 @@ def page_issue_to_farmer():
 
     st.markdown("---")
     st.markdown("### ID Capture")
-    st.caption("Choose Camera or Upload for both Front and Back")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown("**ID Front**")
-        front_method = st.radio("Front Method", ["📷 Camera", "📁 Upload"],
-                                key="front_method", horizontal=True, label_visibility="collapsed")
-        if front_method == "📷 Camera":
-            id_front = st.camera_input("Take ID Front", key="cam_front")
-        else:
-            id_front = st.file_uploader("Upload ID Front", type=["jpg", "jpeg", "png"], key="up_front")
+    capture_mode = st.radio(
+        "How is the ID being captured?",
+        ["💻 This Device (camera/upload)", "📱 Phone (remote capture)"],
+        horizontal=True,
+        key="capture_mode"
+    )
 
-    with col_b:
-        st.markdown("**ID Back**")
-        back_method = st.radio("Back Method", ["📷 Camera", "📁 Upload"],
-                               key="back_method", horizontal=True, label_visibility="collapsed")
-        if back_method == "📷 Camera":
-            id_back = st.camera_input("Take ID Back", key="cam_back")
-        else:
-            id_back = st.file_uploader("Upload ID Back", type=["jpg", "jpeg", "png"], key="up_back")
+    id_front = None
+    id_back = None
+    remote_front_b64 = None
+    remote_back_b64 = None
+
+    if capture_mode == "💻 This Device (camera/upload)":
+        st.caption("Choose Camera or Upload for both Front and Back")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("**ID Front**")
+            front_method = st.radio("Front Method", ["📷 Camera", "📁 Upload"],
+                                    key="front_method", horizontal=True, label_visibility="collapsed")
+            if front_method == "📷 Camera":
+                id_front = st.camera_input("Take ID Front", key="cam_front")
+            else:
+                id_front = st.file_uploader("Upload ID Front", type=["jpg", "jpeg", "png"], key="up_front")
+
+        with col_b:
+            st.markdown("**ID Back**")
+            back_method = st.radio("Back Method", ["📷 Camera", "📁 Upload"],
+                                   key="back_method", horizontal=True, label_visibility="collapsed")
+            if back_method == "📷 Camera":
+                id_back = st.camera_input("Take ID Back", key="cam_back")
+            else:
+                id_back = st.file_uploader("Upload ID Back", type=["jpg", "jpeg", "png"], key="up_back")
+
+    else:
+        st.caption("Generate a code here, capture the ID on your phone under **📷 Remote ID Capture**, then refresh here to pull it in.")
+
+        col_gen, col_ref = st.columns(2)
+        with col_gen:
+            if st.button("🔁 Generate New Code", use_container_width=True):
+                st.session_state.capture_code = generate_capture_code()
+                st.rerun()
+        with col_ref:
+            if st.button("🔄 Refresh from Phone", use_container_width=True):
+                st.rerun()  # just re-run; the fetch below always pulls the latest
+
+        if not st.session_state.capture_code:
+            st.session_state.capture_code = generate_capture_code()
+
+        st.markdown(f"### Code: `{st.session_state.capture_code}`")
+        st.info("On the phone: open this app → log in → **📷 Remote ID Capture** → enter this code → capture Front & Back.")
+
+        pending = load_id_capture(st.session_state.capture_code)
+        remote_front_b64 = pending.get("front_b64") if pending else None
+        remote_back_b64 = pending.get("back_b64") if pending else None
+
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            st.markdown("**ID Front**")
+            if remote_front_b64:
+                st.image(remote_front_b64, use_container_width=True)
+                st.success("Received from phone ✅")
+            else:
+                st.warning("Not yet captured on phone")
+        with col_p2:
+            st.markdown("**ID Back**")
+            if remote_back_b64:
+                st.image(remote_back_b64, use_container_width=True)
+                st.success("Received from phone ✅")
+            else:
+                st.warning("Not yet captured on phone")
 
     st.markdown("---")
 
@@ -671,12 +803,15 @@ def page_issue_to_farmer():
                 "issued_by": st.session_state.user["name"],
                 "department": st.session_state.user["department"],
                 "issuer_mobile": st.session_state.user["mobile"],
-                "id_front_b64": image_to_base64(id_front),
-                "id_back_b64": image_to_base64(id_back)
+                "id_front_b64": remote_front_b64 if capture_mode != "💻 This Device (camera/upload)" else image_to_base64(id_front),
+                "id_back_b64": remote_back_b64 if capture_mode != "💻 This Device (camera/upload)" else image_to_base64(id_back)
             }
 
-            # Clear the list
+            # Clear the list and any pending remote capture
             st.session_state.issue_items = []
+            if capture_mode != "💻 This Device (camera/upload)" and st.session_state.capture_code:
+                delete_id_capture(st.session_state.capture_code)
+                st.session_state.capture_code = None
 
             st.success("✅ All products issued successfully! Go to **Receipt** menu to view and print.")
             st.balloons()
@@ -849,6 +984,8 @@ def main():
                 page_view_stock()
             elif "👨‍🌾 Issue to Farmer" in menu:
                 page_issue_to_farmer()
+            elif "📷 Remote ID Capture" in menu:
+                page_remote_capture()
             elif "🧾 Receipt" in menu:
                 page_receipt()
             elif "📋 Farmers List" in menu:
