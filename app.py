@@ -381,16 +381,11 @@ def page_home():
 
 def page_receive_stock():
     st.title("📦 Receive Stock")
+    st.caption("View only. New products and received quantities are added by the admin under **⚙️ Manage Products**.")
     stock = load_stock()
-    with st.form("receive_form"):
-        product = st.selectbox("Select Product", get_all_products())
-        quantity = st.number_input("Quantity Received", min_value=1, value=10)
-        if st.form_submit_button("✅ Confirm Receive Stock", use_container_width=True):
-            stock[product]["received"] += quantity
-            stock[product]["available"] += quantity
-            save_stock_row(product, stock[product])
-            st.success(f"Received **{quantity}** of **{product}**")
-            st.balloons()
+    data = [{"Product": p, "Received": v["received"], "Issued": v["issued"], "Available": v["available"]}
+            for p, v in stock.items()]
+    st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
 
 
 def page_view_stock():
@@ -428,14 +423,20 @@ def page_manage_products():
     st.success("🔓 Admin access granted.")
     st.markdown("---")
 
+    stock = load_stock()
     existing = get_all_products()
-    st.write("**Current Products:**")
-    for p in existing:
-        st.write(f"• {p}")
+
+    st.write("**Current Products & Stock:**")
+    data = [{"Product": p, "Received": stock[p]["received"], "Issued": stock[p]["issued"], "Available": stock[p]["available"]}
+            for p in existing]
+    st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
 
     st.markdown("---")
+    st.subheader("➕ Add a New Product")
+    st.caption("Register a brand-new product name. It starts at 0 stock — use the section below to receive quantity.")
     with st.form("add_product_form"):
         new_product = st.text_input("New Product Name", placeholder="e.g. Agripest Organic (2L Bottle)")
+        new_qty = st.number_input("Opening Quantity (optional)", min_value=0, value=0)
         if st.form_submit_button("➕ Add Product", use_container_width=True):
             new_product = new_product.strip()
             if not new_product:
@@ -444,10 +445,28 @@ def page_manage_products():
                 st.warning("This product already exists.")
             else:
                 save_new_product(new_product)
-                save_stock_row(new_product, {"received": 0, "issued": 0, "available": 0})
-                st.success(f"Product **{new_product}** added successfully!")
+                save_stock_row(new_product, {
+                    "received": new_qty,
+                    "issued": 0,
+                    "available": new_qty
+                })
+                st.success(f"Product **{new_product}** added with opening quantity **{new_qty}**!")
                 st.balloons()
                 st.rerun()
+
+    st.markdown("---")
+    st.subheader("📥 Receive Stock (Existing Product)")
+    st.caption("Add received quantity to a product that already exists.")
+    with st.form("receive_stock_form"):
+        product = st.selectbox("Select Product", existing)
+        quantity = st.number_input("Quantity Received", min_value=1, value=10, key="admin_receive_qty")
+        if st.form_submit_button("✅ Confirm Receive Stock", use_container_width=True):
+            stock[product]["received"] += quantity
+            stock[product]["available"] += quantity
+            save_stock_row(product, stock[product])
+            st.success(f"Received **{quantity}** of **{product}**")
+            st.balloons()
+            st.rerun()
 
     st.markdown("---")
     if st.button("🔒 Lock Admin Panel", use_container_width=True):
