@@ -180,6 +180,18 @@ def save_new_product(name):
     supabase.table("products").insert({"name": name}).execute()
 
 
+def delete_product_everywhere(name):
+    """Remove a product from the products table and its stock row."""
+    try:
+        supabase.table("products").delete().eq("name", name).execute()
+    except Exception:
+        pass
+    try:
+        supabase.table("stock").delete().eq("product", name).execute()
+    except Exception:
+        pass
+
+
 def get_all_products():
     """Built-in PRODUCTS list + any admin-added products, de-duplicated, in order."""
     all_products = list(PRODUCTS)
@@ -467,6 +479,49 @@ def page_manage_products():
             st.success(f"Received **{quantity}** of **{product}**")
             st.balloons()
             st.rerun()
+
+    st.markdown("---")
+    st.subheader("🛠️ Fix / Correct Stock Numbers")
+    st.caption("Directly edit Received, Issued or Available for any product — use this to correct numbers that have added up wrongly. Edit the cells then press Save.")
+
+    fix_df = pd.DataFrame([
+        {"Product": p, "Received": stock[p]["received"], "Issued": stock[p]["issued"], "Available": stock[p]["available"]}
+        for p in existing
+    ])
+    edited_df = st.data_editor(
+        fix_df,
+        use_container_width=True,
+        hide_index=True,
+        disabled=["Product"],
+        key="stock_fix_editor"
+    )
+
+    if st.button("💾 Save Corrected Numbers", use_container_width=True):
+        for _, row in edited_df.iterrows():
+            save_stock_row(row["Product"], {
+                "received": int(row["Received"]),
+                "issued": int(row["Issued"]),
+                "available": int(row["Available"])
+            })
+        st.success("Stock numbers updated.")
+        st.rerun()
+
+    st.markdown("---")
+    st.subheader("🗑️ Delete a Product")
+    deletable = load_extra_products()  # only admin-added products can be fully deleted
+    if not deletable:
+        st.caption("No admin-added products to delete. (The original built-in products can't be removed, but you can zero them out above.)")
+    else:
+        with st.form("delete_product_form"):
+            product_to_delete = st.selectbox("Select Product to Delete", deletable)
+            confirm = st.checkbox("I confirm I want to permanently delete this product and its stock record.")
+            if st.form_submit_button("🗑️ Delete Product", use_container_width=True):
+                if not confirm:
+                    st.error("Please confirm before deleting.")
+                else:
+                    delete_product_everywhere(product_to_delete)
+                    st.success(f"Deleted **{product_to_delete}**.")
+                    st.rerun()
 
     st.markdown("---")
     if st.button("🔒 Lock Admin Panel", use_container_width=True):
