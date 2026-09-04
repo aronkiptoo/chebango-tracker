@@ -1,0 +1,20 @@
+{
+  "254701593581": {
+    "password": "1234",
+    "name": "Caroline Cherotich",
+    "department": "Accountant",
+    "must_change_password": true
+  },
+  "254724334842": {
+    "password": "1234",
+    "name": "Too Patrick",
+    "department": "Field Manager",
+    "must_change_password": true
+  },
+  "254769468742": {
+    "password": "Kiptoo@2002",
+    "name": "Aron Yegon",
+    "department": "ICT",
+    "must_change_password": false
+  }
+}
