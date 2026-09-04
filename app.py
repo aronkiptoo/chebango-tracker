@@ -105,7 +105,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- PRODUCTS ----------
+# ---------- PRODUCTS (built-in defaults) ----------
 PRODUCTS = [
     "Agripest Organic (250ml Bottle)",
     "Agripest Organic (500ml Bottle)",
@@ -113,6 +113,18 @@ PRODUCTS = [
     "Flower Dust (1kg Bag)",
     "Flower Dust (5kg Bag)"
 ]
+
+# ---------- ADMIN CONFIG ----------
+# Only these mobile numbers can add new products. Add/remove numbers as needed.
+# Currently set to Aron Yegon (ICT). Too Patrick and Caroline are NOT in this
+# set, so they will only ever see "View Stock" and never the "Manage Products"
+# admin page.
+ADMIN_MOBILES = {"254769468742"}  # Aron Yegon (ICT)
+
+def is_admin():
+    user = st.session_state.get("user")
+    return bool(user) and user.get("mobile") in ADMIN_MOBILES
+
 
 # ---------- LOGO HELPERS ----------
 def logo_base64():
@@ -150,11 +162,38 @@ def update_user_password(mobile, new_password):
     }).eq("mobile", mobile).execute()
 
 
+def load_extra_products():
+    """
+    Products added by the admin through the 'Manage Products' page, stored in
+    a Supabase table called 'products' (columns: id, name).
+    Returns an empty list if the table doesn't exist yet or on any error.
+    """
+    try:
+        res = supabase.table("products").select("*").execute()
+        rows = res.data or []
+        return [r["name"] for r in rows if r.get("name")]
+    except Exception:
+        return []
+
+
+def save_new_product(name):
+    supabase.table("products").insert({"name": name}).execute()
+
+
+def get_all_products():
+    """Built-in PRODUCTS list + any admin-added products, de-duplicated, in order."""
+    all_products = list(PRODUCTS)
+    for p in load_extra_products():
+        if p not in all_products:
+            all_products.append(p)
+    return all_products
+
+
 def load_stock():
     res = supabase.table("stock").select("*").execute()
     rows = res.data or []
     stock = {r["product"]: {"received": r["received"], "issued": r["issued"], "available": r["available"]} for r in rows}
-    for p in PRODUCTS:
+    for p in get_all_products():
         if p not in stock:
             stock[p] = {"received": 0, "issued": 0, "available": 0}
     return stock
@@ -226,6 +265,8 @@ if "last_receipt" not in st.session_state:
     st.session_state.last_receipt = None
 if "issue_items" not in st.session_state:
     st.session_state.issue_items = []
+if "admin_unlocked" not in st.session_state:
+    st.session_state.admin_unlocked = False
 
 
 # ---------- LOGIN ----------
@@ -300,7 +341,7 @@ def show_sidebar():
         st.caption(st.session_state.user['mobile'])
         st.markdown("---")
 
-        menu = st.radio("Menu", [
+        menu_items = [
             "🏠 Home",
             "📦 Receive Stock",
             "📊 View Stock",
@@ -308,13 +349,20 @@ def show_sidebar():
             "🧾 Receipt",
             "📋 Farmers List",
             "📄 Reports"
-        ], label_visibility="collapsed")
+        ]
+        # Only admins ever see this option — everyone else (e.g. Too Patrick,
+        # Caroline) only ever gets "📊 View Stock" to look at available stock.
+        if is_admin():
+            menu_items.append("⚙️ Manage Products")
+
+        menu = st.radio("Menu", menu_items, label_visibility="collapsed")
 
         st.markdown("---")
         if st.button("🚪 Logout", use_container_width=True):
             st.session_state.logged_in = False
             st.session_state.user = None
             st.session_state.issue_items = []
+            st.session_state.admin_unlocked = False
             st.rerun()
         return menu
 
@@ -326,7 +374,7 @@ def page_home():
     stock = load_stock()
     total = sum(v["available"] for v in stock.values())
     col1, col2, col3 = st.columns(3)
-    col1.metric("Products", len(PRODUCTS))
+    col1.metric("Products", len(get_all_products()))
     col2.metric("Total Available", f"{total:,}")
     col3.metric("Department", st.session_state.user["department"])
 
@@ -335,7 +383,7 @@ def page_receive_stock():
     st.title("📦 Receive Stock")
     stock = load_stock()
     with st.form("receive_form"):
-        product = st.selectbox("Select Product", PRODUCTS)
+        product = st.selectbox("Select Product", get_all_products())
         quantity = st.number_input("Quantity Received", min_value=1, value=10)
         if st.form_submit_button("✅ Confirm Receive Stock", use_container_width=True):
             stock[product]["received"] += quantity
@@ -355,10 +403,62 @@ def page_view_stock():
     st.metric("🟢 Total Available Stock", f"{total:,}")
 
 
+def page_manage_products():
+    """Admin-only, password-protected page for adding new products."""
+    st.title("⚙️ Manage Products")
+    st.caption("Admin only — add new products so they appear across the system.")
+
+    if not is_admin():
+        st.error("You do not have permission to access this page.")
+        return
+
+    if not st.session_state.admin_unlocked:
+        st.info("Enter the admin password to unlock this page.")
+        with st.form("admin_pwd_form"):
+            pwd = st.text_input("Admin Password", type="password")
+            if st.form_submit_button("🔓 Unlock", use_container_width=True):
+                admin_password = st.secrets.get("ADMIN_PASSWORD", "changeme123")
+                if pwd == admin_password:
+                    st.session_state.admin_unlocked = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect admin password.")
+        return
+
+    st.success("🔓 Admin access granted.")
+    st.markdown("---")
+
+    existing = get_all_products()
+    st.write("**Current Products:**")
+    for p in existing:
+        st.write(f"• {p}")
+
+    st.markdown("---")
+    with st.form("add_product_form"):
+        new_product = st.text_input("New Product Name", placeholder="e.g. Agripest Organic (2L Bottle)")
+        if st.form_submit_button("➕ Add Product", use_container_width=True):
+            new_product = new_product.strip()
+            if not new_product:
+                st.error("Please enter a product name.")
+            elif new_product in existing:
+                st.warning("This product already exists.")
+            else:
+                save_new_product(new_product)
+                save_stock_row(new_product, {"received": 0, "issued": 0, "available": 0})
+                st.success(f"Product **{new_product}** added successfully!")
+                st.balloons()
+                st.rerun()
+
+    st.markdown("---")
+    if st.button("🔒 Lock Admin Panel", use_container_width=True):
+        st.session_state.admin_unlocked = False
+        st.rerun()
+
+
 def page_issue_to_farmer():
     st.title("👨‍🌾 Issue Product to Farmer")
     stock = load_stock()
-    available_products = [p for p in PRODUCTS if stock[p]["available"] > 0]
+    available_products = [p for p in get_all_products() if stock[p]["available"] > 0]
 
     if not available_products:
         st.error("No stock available. Please receive stock first.")
@@ -681,6 +781,8 @@ def main():
                 page_farmers_list()
             elif "📄 Reports" in menu:
                 page_reports()
+            elif "⚙️ Manage Products" in menu:
+                page_manage_products()
 
 
 if __name__ == "__main__":
