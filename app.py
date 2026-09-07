@@ -1,11 +1,13 @@
 """
 Chebango Tracker - Supabase-backed Version (persistent storage)
 Mobile-responsive UI with logo branding + Multi-product issuance
+FIXES: stock math, EAT timezone, receipt labels, single-page PDF download
 """
 
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import os
 import base64
 import random
@@ -14,6 +16,18 @@ from io import BytesIO
 import streamlit.components.v1 as components
 from PIL import Image
 from supabase import create_client, Client
+
+try:
+    from fpdf import FPDF
+    FPDF_AVAILABLE = True
+except ImportError:
+    FPDF_AVAILABLE = False
+
+# East Africa Time (Kenya)
+EAT = ZoneInfo("Africa/Nairobi")
+
+def now_eat():
+    return datetime.now(EAT)
 
 # ---------- SUPABASE CLIENT ----------
 @st.cache_resource
@@ -25,7 +39,7 @@ def get_supabase_client() -> Client:
 supabase = get_supabase_client()
 
 # ---------- LOGO ----------
-LOGO_PATH = "chebango_logo.png"  # keep this file in the same folder as app.py
+LOGO_PATH = "chebango_logo.png"
 
 def get_logo_image():
     if os.path.exists(LOGO_PATH):
@@ -44,7 +58,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ---------- CSS (mobile-responsive + centered) ----------
+# ---------- CSS ----------
 st.markdown("""
 <style>
     .stApp { background-color: #f4f1e8; }
@@ -53,8 +67,7 @@ st.markdown("""
     [data-testid="stMetricValue"] { color: #1b4332 !important; font-weight: 700 !important; }
     [data-testid="stMetricLabel"] { color: #1b4332 !important; font-weight: 600 !important; }
     h1, h2, h3, p, label, .stMarkdown { color: #1b4332 !important; }
-    
-    /* Center main content */
+
     .block-container {
         max-width: 1100px !important;
         padding-left: 2rem !important;
@@ -80,10 +93,10 @@ st.markdown("""
     .login-logo-wrap img { max-width: 240px; width: 70%; height: auto; }
 
     @media (max-width: 768px) {
-        .block-container { 
-            padding-left: 0.8rem !important; 
-            padding-right: 0.8rem !important; 
-            padding-top: 1rem !important; 
+        .block-container {
+            padding-left: 0.8rem !important;
+            padding-right: 0.8rem !important;
+            padding-top: 1rem !important;
             max-width: 100% !important;
         }
         h1 { font-size: 1.45rem !important; }
@@ -107,7 +120,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- PRODUCTS (built-in defaults) ----------
+# ---------- PRODUCTS ----------
 PRODUCTS = [
     "Agripest Organic (250ml Bottle)",
     "Agripest Organic (500ml Bottle)",
@@ -116,11 +129,6 @@ PRODUCTS = [
     "Flower Dust (5kg Bag)"
 ]
 
-# ---------- ADMIN CONFIG ----------
-# Only these mobile numbers can add new products. Add/remove numbers as needed.
-# Currently set to Aron Yegon (ICT). Too Patrick and Caroline are NOT in this
-# set, so they will only ever see "View Stock" and never the "Manage Products"
-# admin page.
 ADMIN_MOBILES = {"254769468742"}  # Aron Yegon (ICT)
 
 def is_admin():
@@ -150,6 +158,7 @@ def render_sidebar_logo():
     if LOGO_B64:
         st.markdown(f'<div class="sidebar-logo-wrap"><img src="data:image/png;base64,{LOGO_B64}"></div>', unsafe_allow_html=True)
 
+
 # ---------- SUPABASE DATA HELPERS ----------
 def load_users():
     res = supabase.table("users").select("*").execute()
@@ -165,11 +174,6 @@ def update_user_password(mobile, new_password):
 
 
 def load_extra_products():
-    """
-    Products added by the admin through the 'Manage Products' page, stored in
-    a Supabase table called 'products' (columns: id, name).
-    Returns an empty list if the table doesn't exist yet or on any error.
-    """
     try:
         res = supabase.table("products").select("*").execute()
         rows = res.data or []
@@ -183,7 +187,6 @@ def save_new_product(name):
 
 
 def delete_product_everywhere(name):
-    """Remove a product from the products table and its stock row."""
     try:
         supabase.table("products").delete().eq("name", name).execute()
     except Exception:
@@ -195,7 +198,6 @@ def delete_product_everywhere(name):
 
 
 def get_all_products():
-    """Built-in PRODUCTS list + any admin-added products, de-duplicated, in order."""
     all_products = list(PRODUCTS)
     for p in load_extra_products():
         if p not in all_products:
@@ -203,10 +205,27 @@ def get_all_products():
     return all_products
 
 
+def _sync_available(values):
+    """Always force available = received - issued (never trust a stale available)."""
+    received = int(values.get("received", 0) or 0)
+    issued = int(values.get("issued", 0) or 0)
+    return {
+        "received": received,
+        "issued": issued,
+        "available": max(0, received - issued)
+    }
+
+
 def load_stock():
     res = supabase.table("stock").select("*").execute()
     rows = res.data or []
-    stock = {r["product"]: {"received": r["received"], "issued": r["issued"], "available": r["available"]} for r in rows}
+    stock = {}
+    for r in rows:
+        stock[r["product"]] = _sync_available({
+            "received": r["received"],
+            "issued": r["issued"],
+            "available": r["available"]
+        })
     for p in get_all_products():
         if p not in stock:
             stock[p] = {"received": 0, "issued": 0, "available": 0}
@@ -214,12 +233,14 @@ def load_stock():
 
 
 def save_stock_row(product, values):
+    synced = _sync_available(values)
     supabase.table("stock").upsert({
         "product": product,
-        "received": values["received"],
-        "issued": values["issued"],
-        "available": values["available"]
+        "received": synced["received"],
+        "issued": synced["issued"],
+        "available": synced["available"]
     }).execute()
+    return synced
 
 
 def load_farmers():
@@ -270,17 +291,24 @@ def image_to_base64(uploaded_file):
         return None
 
 
-# ---------- REMOTE (PHONE) ID CAPTURE HELPERS ----------
-# Lets an officer generate a short code on the laptop, capture the farmer's
-# ID with a phone camera under that code, then pull the photos back into the
-# laptop session with a "Refresh" button — no need to physically use the
-# laptop's own camera.
+def b64_to_bytes(data_uri):
+    """Convert data:image/...;base64,... to raw bytes for PDF embedding."""
+    if not data_uri:
+        return None
+    try:
+        if "," in data_uri:
+            data_uri = data_uri.split(",", 1)[1]
+        return base64.b64decode(data_uri)
+    except Exception:
+        return None
+
+
+# ---------- REMOTE ID CAPTURE ----------
 def generate_capture_code():
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 
 def load_id_capture(code):
-    """Fetch a pending remote capture by its code. Returns dict or None."""
     if not code:
         return None
     try:
@@ -292,7 +320,6 @@ def load_id_capture(code):
 
 
 def save_id_capture(code, front_b64=None, back_b64=None):
-    """Upsert a remote capture, keeping whichever side was already uploaded."""
     existing = load_id_capture(code) or {}
     payload = {
         "code": code,
@@ -408,8 +435,6 @@ def show_sidebar():
             "📋 Farmers List",
             "📄 Reports"
         ]
-        # Only admins ever see this option — everyone else (e.g. Too Patrick,
-        # Caroline) only ever gets "📊 View Stock" to look at available stock.
         if is_admin():
             menu_items.append("⚙️ Manage Products")
 
@@ -457,7 +482,6 @@ def page_view_stock():
 
 
 def page_manage_products():
-    """Admin-only, password-protected page for adding new products."""
     st.title("⚙️ Manage Products")
     st.caption("Admin only — add new products so they appear across the system.")
 
@@ -484,10 +508,17 @@ def page_manage_products():
     stock = load_stock()
     existing = get_all_products()
 
-    st.write("**Current Products & Stock:**")
+    st.write("**Current Products & Stock** (Available is always Received − Issued):")
     data = [{"Product": p, "Received": stock[p]["received"], "Issued": stock[p]["issued"], "Available": stock[p]["available"]}
             for p in existing]
     st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+
+    # One-click heal of any stale DB rows
+    if st.button("🔄 Recalculate All Available (Received − Issued)", use_container_width=True):
+        for p in existing:
+            save_stock_row(p, stock[p])
+        st.success("All available quantities recalculated and saved.")
+        st.rerun()
 
     st.markdown("---")
     st.subheader("➕ Add a New Product")
@@ -520,7 +551,6 @@ def page_manage_products():
         quantity = st.number_input("Quantity Received", min_value=1, value=10, key="admin_receive_qty")
         if st.form_submit_button("✅ Confirm Receive Stock", use_container_width=True):
             stock[product]["received"] += quantity
-            stock[product]["available"] += quantity
             save_stock_row(product, stock[product])
             st.success(f"Received **{quantity}** of **{product}**")
             st.balloons()
@@ -528,7 +558,7 @@ def page_manage_products():
 
     st.markdown("---")
     st.subheader("🛠️ Fix / Correct Stock Numbers")
-    st.caption("Directly edit Received, Issued or Available for any product — use this to correct numbers that have added up wrongly. Edit the cells then press Save.")
+    st.caption("Edit Received or Issued. Available is always recalculated as Received − Issued when you save.")
 
     fix_df = pd.DataFrame([
         {"Product": p, "Received": stock[p]["received"], "Issued": stock[p]["issued"], "Available": stock[p]["available"]}
@@ -538,7 +568,7 @@ def page_manage_products():
         fix_df,
         use_container_width=True,
         hide_index=True,
-        disabled=["Product"],
+        disabled=["Product", "Available"],
         key="stock_fix_editor"
     )
 
@@ -547,16 +577,16 @@ def page_manage_products():
             save_stock_row(row["Product"], {
                 "received": int(row["Received"]),
                 "issued": int(row["Issued"]),
-                "available": int(row["Available"])
+                "available": 0  # will be recalculated
             })
-        st.success("Stock numbers updated.")
+        st.success("Stock numbers updated (Available = Received − Issued).")
         st.rerun()
 
     st.markdown("---")
     st.subheader("🗑️ Delete a Product")
-    deletable = load_extra_products()  # only admin-added products can be fully deleted
+    deletable = load_extra_products()
     if not deletable:
-        st.caption("No admin-added products to delete. (The original built-in products can't be removed, but you can zero them out above.)")
+        st.caption("No admin-added products to delete. (Built-in products can't be removed; zero them out above.)")
     else:
         with st.form("delete_product_form"):
             product_to_delete = st.selectbox("Select Product to Delete", deletable)
@@ -631,7 +661,6 @@ def page_issue_to_farmer():
     st.markdown("---")
     st.markdown("### Products to Issue")
 
-    # Show currently added products
     if st.session_state.issue_items:
         st.write("**Selected Products:**")
         for i, item in enumerate(st.session_state.issue_items):
@@ -645,14 +674,12 @@ def page_issue_to_farmer():
                     st.session_state.issue_items.pop(i)
                     st.rerun()
 
-    # Add new product section
     with st.expander("➕ Add Product", expanded=True):
         col_p, col_q = st.columns([3, 1])
         with col_p:
             product = st.selectbox("Select Product", available_products, key="add_product")
         with col_q:
             max_qty = stock[product]["available"]
-            # Reduce max_qty by already selected quantity of same product
             already_selected = sum(item["quantity"] for item in st.session_state.issue_items if item["product"] == product)
             max_qty = max(1, max_qty - already_selected)
             quantity = st.number_input("Quantity", min_value=1, max_value=max_qty, value=1, key="add_qty")
@@ -715,7 +742,7 @@ def page_issue_to_farmer():
                 st.rerun()
         with col_ref:
             if st.button("🔄 Refresh from Phone", use_container_width=True):
-                st.rerun()  # just re-run; the fetch below always pulls the latest
+                st.rerun()
 
         if not st.session_state.capture_code:
             st.session_state.capture_code = generate_capture_code()
@@ -745,14 +772,13 @@ def page_issue_to_farmer():
 
     st.markdown("---")
 
-    # Final submit button
     if st.button("✅ Issue All Products & Generate Receipt", type="primary", use_container_width=True):
         if not farmer_name or not grower_number or not id_number or not mobile:
             st.error("Please fill all farmer details.")
         elif not st.session_state.issue_items:
             st.error("Please add at least one product.")
         else:
-            now = datetime.now()
+            now = now_eat()
             receipt_no = f"{now.strftime('%y%m%d%H%M')}"
             date_str = now.strftime("%d %b %Y %H:%M")
             time_str = now.strftime("%H:%M:%S")
@@ -764,12 +790,9 @@ def page_issue_to_farmer():
                 product = item["product"]
                 quantity = item["quantity"]
 
-                # Update stock
                 stock[product]["issued"] += quantity
-                stock[product]["available"] -= quantity
                 save_stock_row(product, stock[product])
 
-                # Save farmer record
                 record = {
                     "Receipt_No": receipt_no,
                     "Date": now.strftime("%Y-%m-%d"),
@@ -789,7 +812,6 @@ def page_issue_to_farmer():
                 issued_products.append(f"{quantity} × {product}")
                 total_qty += quantity
 
-            # Create receipt data
             st.session_state.last_receipt = {
                 "receipt_no": receipt_no,
                 "date_str": date_str,
@@ -807,46 +829,195 @@ def page_issue_to_farmer():
                 "id_back_b64": remote_back_b64 if capture_mode != "💻 This Device (camera/upload)" else image_to_base64(id_back)
             }
 
-            # Clear the list and any pending remote capture
             st.session_state.issue_items = []
             if capture_mode != "💻 This Device (camera/upload)" and st.session_state.capture_code:
                 delete_id_capture(st.session_state.capture_code)
                 st.session_state.capture_code = None
 
-            st.success("✅ All products issued successfully! Go to **Receipt** menu to view and print.")
+            st.success("✅ All products issued successfully! Go to **Receipt** menu to download the PDF.")
             st.balloons()
             st.rerun()
 
 
-def render_professional_receipt(r):
+# ---------- PDF RECEIPT (single A4 page) ----------
+def build_receipt_pdf(r) -> bytes:
+    """Build a compact single-page PDF with ID photos + Store / Gate / Farmer copies."""
+    if not FPDF_AVAILABLE:
+        raise RuntimeError("fpdf2 is not installed")
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=False)
+    pdf.add_page()
+    pdf.set_margins(8, 6, 8)
+
+    page_w = 210 - 16  # usable width
+
+    # --- ID section ---
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 5, "FARMER IDENTIFICATION", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(1)
+
+    front_bytes = b64_to_bytes(r.get("id_front_b64"))
+    back_bytes = b64_to_bytes(r.get("id_back_b64"))
+
+    img_w = 55
+    img_h = 35
+    y_img = pdf.get_y()
+    x1 = 20
+    x2 = 110
+
+    if front_bytes:
+        try:
+            pdf.image(BytesIO(front_bytes), x=x1, y=y_img, w=img_w, h=img_h)
+        except Exception:
+            pdf.set_xy(x1, y_img)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.cell(img_w, img_h, "[No Front ID]", border=1, align="C")
+    else:
+        pdf.set_xy(x1, y_img)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.cell(img_w, img_h, "[No Front ID]", border=1, align="C")
+
+    if back_bytes:
+        try:
+            pdf.image(BytesIO(back_bytes), x=x2, y=y_img, w=img_w, h=img_h)
+        except Exception:
+            pdf.set_xy(x2, y_img)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.cell(img_w, img_h, "[No Back ID]", border=1, align="C")
+    else:
+        pdf.set_xy(x2, y_img)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.cell(img_w, img_h, "[No Back ID]", border=1, align="C")
+
+    pdf.set_y(y_img + img_h + 1)
+    pdf.set_font("Helvetica", "", 7)
+    pdf.set_x(x1)
+    pdf.cell(img_w, 3, "Front", align="C")
+    pdf.set_x(x2)
+    pdf.cell(img_w, 3, "Back", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+    def draw_copy(label):
+        """Draw one compact receipt block."""
+        start_y = pdf.get_y()
+        pdf.set_draw_color(26, 122, 58)
+        pdf.set_line_width(0.4)
+
+        # Outer box height estimate ~42mm
+        box_h = 42
+        pdf.rect(8, start_y, page_w, box_h)
+
+        pdf.set_xy(10, start_y + 2)
+        pdf.set_font("Helvetica", "B", 7.5)
+        pdf.cell(120, 3.5, "MINISTRY OF AGRICULTURE - PRODUCT DISTRIBUTION PROGRAM")
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.cell(0, 3.5, label, align="R", new_x="LMARGIN", new_y="NEXT")
+
+        pdf.set_x(10)
+        pdf.set_font("Helvetica", "", 7)
+        pdf.cell(120, 3, "CHEBANGO TEA FACTORY")
+        pdf.cell(0, 3, f"Receipt No: {r['receipt_no']}", align="R", new_x="LMARGIN", new_y="NEXT")
+
+        pdf.set_x(10)
+        pdf.cell(0, 3, f"Date: {r['date_str']}", align="R", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(1)
+
+        # Details — Received By = farmer, Phone = farmer mobile
+        rows = [
+            ("Farmer Name:", r["farmer_name"]),
+            ("ID Number:", r["id_number"]),
+            ("Grower Number:", r["grower_number"]),
+            ("Product(s):", r["product"]),
+            ("Total Quantity:", str(r["quantity"])),
+            ("Received By:", r["farmer_name"]),
+            ("Phone:", r["mobile"]),
+        ]
+        pdf.set_font("Helvetica", "", 7.5)
+        for label_t, val in rows:
+            pdf.set_x(12)
+            pdf.set_font("Helvetica", "B", 7.5)
+            pdf.cell(32, 3.2, label_t)
+            pdf.set_font("Helvetica", "", 7.5)
+            # Truncate long product lines
+            text = str(val)
+            if len(text) > 70:
+                text = text[:67] + "..."
+            pdf.cell(0, 3.2, text, new_x="LMARGIN", new_y="NEXT")
+
+        # Signature lines
+        sig_y = start_y + box_h - 8
+        pdf.set_draw_color(50, 50, 50)
+        pdf.set_line_width(0.2)
+        pdf.line(18, sig_y, 80, sig_y)
+        pdf.line(120, sig_y, 185, sig_y)
+        pdf.set_xy(18, sig_y + 1)
+        pdf.set_font("Helvetica", "", 6.5)
+        pdf.cell(62, 3, "Recipient Signature", align="C")
+        pdf.set_xy(120, sig_y + 1)
+        pdf.cell(65, 3, "Authorized Officer", align="C")
+
+        pdf.set_y(start_y + box_h + 2)
+
+    draw_copy("STORE RECEIPT")
+    # dashed separator
+    pdf.set_draw_color(100, 100, 100)
+    y = pdf.get_y()
+    for x in range(10, 200, 4):
+        pdf.line(x, y, x + 2, y)
+    pdf.ln(3)
+
+    draw_copy("GATE COPY")
+    y = pdf.get_y()
+    for x in range(10, 200, 4):
+        pdf.line(x, y, x + 2, y)
+    pdf.ln(3)
+
+    draw_copy("FARMER COPY")
+
+    pdf.set_y(pdf.get_y() + 1)
+    pdf.set_font("Helvetica", "I", 6.5)
+    pdf.set_text_color(80, 80, 80)
+    pdf.cell(0, 3, "This receipt number is traceable and secured. Keep the duplicate copy for your records.", align="C")
+
+    buf = BytesIO()
+    pdf.output(buf)
+    return buf.getvalue()
+
+
+def render_professional_receipt_preview(r):
+    """Compact on-screen preview (not for printing — use PDF)."""
     front_img = r.get("id_front_b64")
     back_img = r.get("id_back_b64")
 
-    front_html = f'<img src="{front_img}" style="max-width:100%; width:260px; max-height:170px; border:1px solid #999;">' if front_img else '<div style="width:100%;max-width:260px;height:150px;border:1px dashed #aaa;display:flex;align-items:center;justify-content:center;color:#888;font-size:13px;">No Front ID</div>'
-    back_html = f'<img src="{back_img}" style="max-width:100%; width:260px; max-height:170px; border:1px solid #999;">' if back_img else '<div style="width:100%;max-width:260px;height:150px;border:1px dashed #aaa;display:flex;align-items:center;justify-content:center;color:#888;font-size:13px;">No Back ID</div>'
+    front_html = (
+        f'<img src="{front_img}" style="max-width:180px; max-height:110px; border:1px solid #999;">'
+        if front_img else
+        '<div style="width:180px;height:100px;border:1px dashed #aaa;display:flex;align-items:center;justify-content:center;color:#888;font-size:12px;">No Front ID</div>'
+    )
+    back_html = (
+        f'<img src="{back_img}" style="max-width:180px; max-height:110px; border:1px solid #999;">'
+        if back_img else
+        '<div style="width:180px;height:100px;border:1px dashed #aaa;display:flex;align-items:center;justify-content:center;color:#888;font-size:12px;">No Back ID</div>'
+    )
 
-    logo_tag = f'<img src="data:image/png;base64,{LOGO_B64}" style="height:40px;">' if LOGO_B64 else ""
-
-    details_rows = f"""
+    details = f"""
         <tr><td class="label">Farmer Name:</td><td>{r['farmer_name']}</td></tr>
         <tr><td class="label">ID Number:</td><td>{r['id_number']}</td></tr>
         <tr><td class="label">Grower Number:</td><td>{r['grower_number']}</td></tr>
         <tr><td class="label">Product(s):</td><td>{r['product']}</td></tr>
         <tr><td class="label">Total Quantity:</td><td><b>{r['quantity']}</b></td></tr>
-        <tr><td class="label">Issued By:</td><td>{r['issued_by']}</td></tr>
-        <tr><td class="label">Phone:</td><td>{r['issuer_mobile']}</td></tr>
+        <tr><td class="label">Received By:</td><td>{r['farmer_name']}</td></tr>
+        <tr><td class="label">Phone:</td><td>{r['mobile']}</td></tr>
     """
 
-    def receipt_block(copy_label):
+    def block(copy_label):
         return f"""
         <div class="receipt-box">
             <div class="header-row">
-                <div class="header-left">
-                    {logo_tag}
-                    <div>
-                        <div class="title">MINISTRY OF AGRICULTURE - PRODUCT DISTRIBUTION PROGRAM</div>
-                        <div class="factory">CHEBANGO TEA FACTORY</div>
-                    </div>
+                <div>
+                    <div class="title">MINISTRY OF AGRICULTURE - PRODUCT DISTRIBUTION PROGRAM</div>
+                    <div class="factory">CHEBANGO TEA FACTORY</div>
                 </div>
                 <div class="right-info">
                     <div style="font-weight:bold;">{copy_label}</div>
@@ -854,7 +1025,7 @@ def render_professional_receipt(r):
                     <div>Date: {r['date_str']}</div>
                 </div>
             </div>
-            <table>{details_rows}</table>
+            <table>{details}</table>
             <div class="signatures">
                 <div class="sign-box">Recipient Signature</div>
                 <div class="sign-box">Authorized Officer</div>
@@ -862,75 +1033,78 @@ def render_professional_receipt(r):
         </div>
         """
 
-    html_content = f"""
+    html = f"""
     <!DOCTYPE html>
-    <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body {{ font-family: Arial, Helvetica, sans-serif; color: #000; margin: 0; padding: 10px; }}
-            .id-section {{ text-align: center; margin-bottom: 12px; }}
-            .id-section h3 {{ margin: 0 0 10px 0; font-size: 15px; letter-spacing: 1px; }}
-            .id-images {{ display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; }}
-            .receipt-box {{ border: 2px solid #1a7a3a; padding: 14px 16px; margin-bottom: 16px; border-radius: 3px; }}
-            .header-row {{ display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 6px; }}
-            .header-left {{ display: flex; align-items: center; gap: 8px; }}
-            .title {{ font-weight: bold; font-size: 12.5px; }}
-            .factory {{ font-size: 12px; margin-top: 2px; }}
-            .right-info {{ text-align: right; font-size: 12.5px; }}
-            table {{ width: 100%; margin-top: 12px; font-size: 13px; border-collapse: collapse; }}
-            td {{ padding: 3px 0; word-break: break-word; }}
-            .label {{ width: 130px; font-weight: bold; }}
-            .signatures {{ display: flex; flex-wrap: wrap; justify-content: space-between; margin-top: 28px; gap: 10px; }}
-            .sign-box {{ flex: 1 1 45%; min-width: 130px; text-align: center; border-top: 1px solid #333; padding-top: 5px; font-size: 11px; }}
-            .footer {{ text-align: center; font-size: 11px; color: #555; margin-top: 14px; }}
-            .dashed {{ border-top: 1.5px dashed #666; margin: 14px 0; }}
-            @media (max-width: 480px) {{
-                .label {{ width: 105px; font-size: 12px; }}
-                table {{ font-size: 12px; }}
-                .title {{ font-size: 11px; }}
-                .factory {{ font-size: 10.5px; }}
-                .right-info {{ font-size: 11px; }}
-            }}
-        </style>
-    </head>
-    <body>
+    <html><head>
+    <style>
+        body {{ font-family: Arial, sans-serif; color: #000; margin: 0; padding: 6px; font-size: 12px; }}
+        .id-section {{ text-align: center; margin-bottom: 6px; }}
+        .id-section h3 {{ margin: 0 0 6px 0; font-size: 13px; }}
+        .id-images {{ display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; }}
+        .receipt-box {{ border: 1.5px solid #1a7a3a; padding: 8px 10px; margin-bottom: 8px; border-radius: 2px; }}
+        .header-row {{ display: flex; justify-content: space-between; gap: 6px; }}
+        .title {{ font-weight: bold; font-size: 11px; }}
+        .factory {{ font-size: 10px; }}
+        .right-info {{ text-align: right; font-size: 11px; }}
+        table {{ width: 100%; margin-top: 6px; font-size: 11.5px; border-collapse: collapse; }}
+        td {{ padding: 1px 0; }}
+        .label {{ width: 110px; font-weight: bold; }}
+        .signatures {{ display: flex; justify-content: space-between; margin-top: 16px; }}
+        .sign-box {{ width: 42%; text-align: center; border-top: 1px solid #333; padding-top: 3px; font-size: 10px; }}
+        .footer {{ text-align: center; font-size: 10px; color: #555; margin-top: 6px; }}
+        .dashed {{ border-top: 1px dashed #666; margin: 6px 0; }}
+    </style>
+    </head><body>
         <div class="id-section">
             <h3>FARMER IDENTIFICATION</h3>
             <div class="id-images">
-                <div>{front_html}<div style="font-size:11px; margin-top:3px;">Front</div></div>
-                <div>{back_html}<div style="font-size:11px; margin-top:3px;">Back</div></div>
+                <div>{front_html}<div style="font-size:10px;">Front</div></div>
+                <div>{back_html}<div style="font-size:10px;">Back</div></div>
             </div>
         </div>
-        <hr style="border:none; border-top:1px solid #333; margin:12px 0;">
-        {receipt_block("STORE RECEIPT")}
+        <hr style="border:none;border-top:1px solid #333;margin:6px 0;">
+        {block("STORE RECEIPT")}
         <div class="dashed"></div>
-        {receipt_block("GATE COPY")}
+        {block("GATE COPY")}
         <div class="dashed"></div>
-        {receipt_block("FARMER COPY")}
-        <p class="footer">This receipt number is traceable and secured. Keep the duplicate copy for your records.</p>
-    </body>
-    </html>
+        {block("FARMER COPY")}
+        <p class="footer">This receipt number is traceable and secured.</p>
+    </body></html>
     """
-    components.html(html_content, height=1550, scrolling=True)
+    components.html(html, height=980, scrolling=True)
 
 
 def page_receipt():
     st.title("🧾 Receipt")
-    st.caption("Store Receipt + Gate Copy + Farmer Copy")
 
     if not st.session_state.last_receipt:
         st.warning("No receipt has been generated yet. Please go to **Issue to Farmer** first.")
         return
 
     r = st.session_state.last_receipt
-    st.success(f"Receipt No: **{r['receipt_no']}**  |  {r['date_str']}")
 
-    if st.button("🖨️ PRINT RECEIPT", use_container_width=True):
-        st.info("Press **Ctrl + P** (or use your phone's share/print option) to print the receipt below.")
+    # PDF download — primary action
+    if FPDF_AVAILABLE:
+        try:
+            pdf_bytes = build_receipt_pdf(r)
+            st.download_button(
+                label="📥 Download Receipt PDF",
+                data=pdf_bytes,
+                file_name=f"Chebango_Receipt_{r['receipt_no']}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                type="primary"
+            )
+            st.caption("Download the PDF, open it, then print. This avoids browser headers/footers and system links.")
+        except Exception as e:
+            st.error(f"Could not generate PDF: {e}")
+            st.info("You can still use the preview below and print with Ctrl+P (turn off headers/footers in the print dialog).")
+    else:
+        st.warning("PDF library not available. Use the preview below and print with Ctrl+P.")
 
     st.markdown("---")
-    render_professional_receipt(r)
+    st.caption(f"Receipt No: **{r['receipt_no']}**  ·  {r['date_str']} (East Africa Time)")
+    render_professional_receipt_preview(r)
 
 
 def page_farmers_list():
@@ -948,7 +1122,7 @@ def page_farmers_list():
     st.download_button(
         "📥 Download Excel",
         data=buffer,
-        file_name=f"Chebango_Farmers_{datetime.now().strftime('%Y%m%d')}.xlsx",
+        file_name=f"Chebango_Farmers_{now_eat().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
@@ -958,13 +1132,21 @@ def page_reports():
     st.title("📄 Reports")
     stock = load_stock()
     df = load_farmers()
+
     st.subheader("Stock Summary")
+    st.caption("Available is always calculated as Received − Issued.")
     for p, v in stock.items():
-        st.write(f"**{p}** → Available: **{v['available']}** | Issued: {v['issued']}")
+        st.write(f"**{p}** → Received: **{v['received']}** | Issued: **{v['issued']}** | Available: **{v['available']}**")
+
     st.subheader("Issuance Summary")
-    st.write(f"Total Farmers Served: **{len(df)}**")
+    # Unique farmers by receipt (multi-product issues share one receipt)
     if not df.empty:
+        unique_receipts = df["Receipt_No"].nunique() if "Receipt_No" in df.columns else len(df)
+        st.write(f"Total Issuance Transactions: **{unique_receipts}**")
+        st.write(f"Total Line Items: **{len(df)}**")
         st.write(f"Total Quantity Distributed: **{df['Quantity'].sum()}**")
+    else:
+        st.write("Total Farmers Served: **0**")
 
 
 # ---------- MAIN ----------
