@@ -280,6 +280,37 @@ def save_farmer(record):
     }).execute()
 
 
+def rebuild_issued_from_farmers():
+    """
+    Set each product's Issued = sum of quantities in the farmers table.
+    Available is then recalculated as Received − Issued.
+    Returns a list of human-readable change lines.
+    """
+    stock = load_stock()
+    farmers = load_farmers()
+    changes = []
+
+    issued_map = {}
+    if not farmers.empty and "Product" in farmers.columns and "Quantity" in farmers.columns:
+        for product, qty in farmers.groupby("Product")["Quantity"].sum().items():
+            issued_map[str(product)] = int(qty)
+
+    for product in get_all_products():
+        current = stock.get(product, {"received": 0, "issued": 0, "available": 0})
+        new_issued = issued_map.get(product, 0)
+        old_issued = int(current.get("issued", 0) or 0)
+        received = int(current.get("received", 0) or 0)
+        if new_issued != old_issued:
+            changes.append(f"{product}: Issued {old_issued} → {new_issued}")
+        save_stock_row(product, {
+            "received": received,
+            "issued": new_issued,
+            "available": 0,
+        })
+
+    return changes
+
+
 def delete_receipt_permanently(receipt_no, restore_stock=True):
     """
     Permanently delete all farmer rows for a receipt number.
@@ -554,6 +585,18 @@ def page_manage_products():
         for p in existing:
             save_stock_row(p, stock[p])
         st.success("All available quantities recalculated and saved.")
+        st.rerun()
+
+    st.info(
+        "If **Issued** does not match the Farmers List / Excel, use the button below. "
+        "It sets Issued = total quantity actually recorded for each product, then Available = Received − Issued."
+    )
+    if st.button("🔁 Rebuild Issued from Farmers List", use_container_width=True, type="primary"):
+        changes = rebuild_issued_from_farmers()
+        if changes:
+            st.success("Stock Issued rebuilt from Farmers List:\n\n" + "\n".join(f"- {c}" for c in changes))
+        else:
+            st.success("Issued already matched Farmers List. Available refreshed.")
         st.rerun()
 
     st.markdown("---")
@@ -1236,12 +1279,26 @@ def page_reports():
         st.write(f"**{p}** → Received: **{v['received']}** | Issued: **{v['issued']}** | Available: **{v['available']}**")
 
     st.subheader("Issuance Summary")
-    # Unique farmers by receipt (multi-product issues share one receipt)
     if not df.empty:
         unique_receipts = df["Receipt_No"].nunique() if "Receipt_No" in df.columns else len(df)
         st.write(f"Total Issuance Transactions: **{unique_receipts}**")
         st.write(f"Total Line Items: **{len(df)}**")
         st.write(f"Total Quantity Distributed: **{df['Quantity'].sum()}**")
+
+        st.subheader("Per-product check (Farmers List vs Stock Issued)")
+        st.caption("These two columns must match. If they differ, use Manage Products → Rebuild Issued from Farmers List.")
+        issued_from_farmers = df.groupby("Product")["Quantity"].sum().to_dict()
+        rows = []
+        for p in get_all_products():
+            from_list = int(issued_from_farmers.get(p, 0))
+            from_stock = int(stock.get(p, {}).get("issued", 0))
+            rows.append({
+                "Product": p,
+                "From Farmers List": from_list,
+                "Stock Issued": from_stock,
+                "Match": "✅" if from_list == from_stock else "❌ MISMATCH",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:
         st.write("Total Farmers Served: **0**")
 
