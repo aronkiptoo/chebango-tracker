@@ -1088,14 +1088,14 @@ def render_professional_receipt_preview(r):
     back_img = r.get("id_back_b64")
 
     front_html = (
-        f'<img src="{front_img}" style="max-width:180px; max-height:110px; border:1px solid #999;">'
+        f'<img src="{front_img}" style="max-width:360px; max-height:220px; border:1px solid #999;">'
         if front_img else
-        '<div style="width:180px;height:100px;border:1px dashed #aaa;display:flex;align-items:center;justify-content:center;color:#888;font-size:12px;">No Front ID</div>'
+        '<div style="width:360px;height:220px;border:1px dashed #aaa;display:flex;align-items:center;justify-content:center;color:#888;font-size:12px;">No Front ID</div>'
     )
     back_html = (
-        f'<img src="{back_img}" style="max-width:180px; max-height:110px; border:1px solid #999;">'
+        f'<img src="{back_img}" style="max-width:360px; max-height:220px; border:1px solid #999;">'
         if back_img else
-        '<div style="width:180px;height:100px;border:1px dashed #aaa;display:flex;align-items:center;justify-content:center;color:#888;font-size:12px;">No Back ID</div>'
+        '<div style="width:360px;height:220px;border:1px dashed #aaa;display:flex;align-items:center;justify-content:center;color:#888;font-size:12px;">No Back ID</div>'
     )
 
     details = f"""
