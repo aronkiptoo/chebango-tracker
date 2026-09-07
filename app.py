@@ -280,6 +280,42 @@ def save_farmer(record):
     }).execute()
 
 
+def delete_receipt_permanently(receipt_no, restore_stock=True):
+    """
+    Permanently delete all farmer rows for a receipt number.
+    If restore_stock is True, reverse the stock impact (issued down, available up).
+    Returns (deleted_count, restored_summary_list).
+    """
+    receipt_no = str(receipt_no).strip()
+    if not receipt_no:
+        return 0, []
+
+    # Fetch rows for this receipt before deleting
+    res = supabase.table("farmers").select("*").eq("receipt_no", receipt_no).execute()
+    rows = res.data or []
+    if not rows:
+        return 0, []
+
+    restored = []
+    if restore_stock:
+        stock = load_stock()
+        for row in rows:
+            product = row.get("product")
+            qty = int(row.get("quantity") or 0)
+            if not product or qty <= 0:
+                continue
+            if product not in stock:
+                stock[product] = {"received": 0, "issued": 0, "available": 0}
+            stock[product]["issued"] = max(0, int(stock[product]["issued"]) - qty)
+            # available will be recalculated as received - issued in save_stock_row
+            save_stock_row(product, stock[product])
+            restored.append(f"{qty} × {product}")
+
+    # Permanent delete
+    supabase.table("farmers").delete().eq("receipt_no", receipt_no).execute()
+    return len(rows), restored
+
+
 def image_to_base64(uploaded_file):
     if uploaded_file is None:
         return None
@@ -598,6 +634,67 @@ def page_manage_products():
                     delete_product_everywhere(product_to_delete)
                     st.success(f"Deleted **{product_to_delete}**.")
                     st.rerun()
+
+    st.markdown("---")
+    st.subheader("🧾 Delete Duplicate / Accidental Receipts")
+    st.caption(
+        "Permanently delete a receipt and all its line items. "
+        "Stock is restored automatically (Issued goes down, Available goes up)."
+    )
+
+    farmers_df = load_farmers()
+    if farmers_df.empty:
+        st.info("No receipts to delete.")
+    else:
+        # One row per receipt for selection
+        receipt_summary = (
+            farmers_df.groupby("Receipt_No", as_index=False)
+            .agg({
+                "Date": "first",
+                "Time": "first",
+                "Farmer_Name": "first",
+                "ID_Number": "first",
+                "Grower_Number": "first",
+                "Quantity": "sum",
+                "Product": lambda x: " + ".join(str(p) for p in x),
+                "Issued_By": "first",
+            })
+            .sort_values(["Date", "Time"], ascending=False)
+        )
+        receipt_summary = receipt_summary.rename(columns={
+            "Quantity": "Total_Qty",
+            "Product": "Products",
+        })
+
+        st.dataframe(receipt_summary, use_container_width=True, hide_index=True)
+
+        receipt_options = [
+            f"{row['Receipt_No']}  |  {row['Date']} {row['Time']}  |  {row['Farmer_Name']}  |  ID {row['ID_Number']}  |  Qty {row['Total_Qty']}"
+            for _, row in receipt_summary.iterrows()
+        ]
+        receipt_map = {
+            f"{row['Receipt_No']}  |  {row['Date']} {row['Time']}  |  {row['Farmer_Name']}  |  ID {row['ID_Number']}  |  Qty {row['Total_Qty']}": row["Receipt_No"]
+            for _, row in receipt_summary.iterrows()
+        }
+
+        with st.form("delete_receipt_form"):
+            selected = st.selectbox("Select receipt to delete", receipt_options)
+            restore = st.checkbox("Restore stock quantities for this receipt", value=True)
+            confirm_del = st.checkbox("I confirm this receipt will be permanently deleted and cannot be recovered.")
+            if st.form_submit_button("🗑️ Delete Selected Receipt Permanently", use_container_width=True):
+                if not confirm_del:
+                    st.error("Please tick the confirmation box before deleting.")
+                else:
+                    receipt_no = receipt_map[selected]
+                    count, restored = delete_receipt_permanently(receipt_no, restore_stock=restore)
+                    if count == 0:
+                        st.warning("No rows found for that receipt (maybe already deleted).")
+                    else:
+                        msg = f"Permanently deleted receipt **{receipt_no}** ({count} line item(s))."
+                        if restored:
+                            msg += " Stock restored: " + "; ".join(restored)
+                        st.success(msg)
+                        st.rerun()
 
     st.markdown("---")
     if st.button("🔒 Lock Admin Panel", use_container_width=True):
