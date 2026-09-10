@@ -1111,14 +1111,9 @@ def build_receipt_pdf(r) -> bytes:
             text = str(val) if val else ""
             if len(text) > 75:
                 text = text[:72] + "..."
-            # Underline blank fields so it's clear they should be filled
+            # Short dash for blank fields (handwriting space)
             if not val:
-                x_line = pdf.get_x()
-                y_line = pdf.get_y() + line_h - 1
-                pdf.cell(0, line_h, "", new_x="LMARGIN", new_y="NEXT")
-                pdf.set_draw_color(80, 80, 80)
-                pdf.set_line_width(0.2)
-                pdf.line(x_line, y_line, left + page_w - 8, y_line)
+                pdf.cell(0, line_h, "________", new_x="LMARGIN", new_y="NEXT")
             else:
                 pdf.cell(0, line_h, text, new_x="LMARGIN", new_y="NEXT")
 
@@ -1179,8 +1174,8 @@ def render_professional_receipt_preview(r):
         <tr><td class="label">Grower Number:</td><td>{r['grower_number']}</td></tr>
         <tr><td class="label">Product(s):</td><td>{r['product']}</td></tr>
         <tr><td class="label">Total Quantity:</td><td><b>{r['quantity']}</b></td></tr>
-        <tr><td class="label">Received By:</td><td style="border-bottom:1px solid #333; min-width:180px;">&nbsp;</td></tr>
-        <tr><td class="label">Phone:</td><td style="border-bottom:1px solid #333; min-width:180px;">&nbsp;</td></tr>
+        <tr><td class="label">Received By:</td><td>________</td></tr>
+        <tr><td class="label">Phone:</td><td>________</td></tr>
     """
 
     def block(copy_label):
