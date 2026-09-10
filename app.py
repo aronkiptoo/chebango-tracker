@@ -979,146 +979,178 @@ def page_issue_to_farmer():
             st.rerun()
 
 
-# ---------- PDF RECEIPT (single A4 page) ----------
+# ---------- PDF RECEIPT (full A4 page) ----------
 def build_receipt_pdf(r) -> bytes:
-    """Build a compact single-page PDF with ID photos + Store / Gate / Farmer copies."""
+    """
+    Full A4 single-page receipt:
+    - ID photos at top
+    - Store / Gate / Farmer copies stretched to fill the page
+    - Received By + Phone left blank for handwriting
+    - Clear signature lines for farmer and officer
+    """
     if not FPDF_AVAILABLE:
         raise RuntimeError("fpdf2 is not installed")
 
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=False)
     pdf.add_page()
-    pdf.set_margins(8, 6, 8)
 
-    page_w = 210 - 16  # usable width
+    # Tight margins so content uses the page
+    left = 8
+    right = 8
+    top = 6
+    bottom = 6
+    page_w = 210 - left - right          # 194 mm
+    page_h = 297
+    usable_bottom = page_h - bottom      # 291
+
+    pdf.set_margins(left, top, right)
+    pdf.set_y(top)
 
     # --- ID section ---
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 5, "FARMER IDENTIFICATION", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 6, "FARMER IDENTIFICATION", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(1)
 
     front_bytes = b64_to_bytes(r.get("id_front_b64"))
     back_bytes = b64_to_bytes(r.get("id_back_b64"))
 
-    img_w = 55
-    img_h = 35
+    img_w = 62
+    img_h = 40
     y_img = pdf.get_y()
-    x1 = 20
-    x2 = 110
+    gap = 16
+    total_imgs = img_w * 2 + gap
+    x1 = left + (page_w - total_imgs) / 2
+    x2 = x1 + img_w + gap
 
-    if front_bytes:
-        try:
-            pdf.image(BytesIO(front_bytes), x=x1, y=y_img, w=img_w, h=img_h)
-        except Exception:
-            pdf.set_xy(x1, y_img)
-            pdf.set_font("Helvetica", "", 8)
-            pdf.cell(img_w, img_h, "[No Front ID]", border=1, align="C")
-    else:
-        pdf.set_xy(x1, y_img)
+    def draw_id_image(data, x, y, placeholder):
+        if data:
+            try:
+                pdf.image(BytesIO(data), x=x, y=y, w=img_w, h=img_h)
+                return
+            except Exception:
+                pass
+        pdf.set_xy(x, y)
         pdf.set_font("Helvetica", "", 8)
-        pdf.cell(img_w, img_h, "[No Front ID]", border=1, align="C")
+        pdf.cell(img_w, img_h, placeholder, border=1, align="C")
 
-    if back_bytes:
-        try:
-            pdf.image(BytesIO(back_bytes), x=x2, y=y_img, w=img_w, h=img_h)
-        except Exception:
-            pdf.set_xy(x2, y_img)
-            pdf.set_font("Helvetica", "", 8)
-            pdf.cell(img_w, img_h, "[No Back ID]", border=1, align="C")
-    else:
-        pdf.set_xy(x2, y_img)
-        pdf.set_font("Helvetica", "", 8)
-        pdf.cell(img_w, img_h, "[No Back ID]", border=1, align="C")
+    draw_id_image(front_bytes, x1, y_img, "[No Front ID]")
+    draw_id_image(back_bytes, x2, y_img, "[No Back ID]")
 
     pdf.set_y(y_img + img_h + 1)
-    pdf.set_font("Helvetica", "", 7)
+    pdf.set_font("Helvetica", "", 8)
     pdf.set_x(x1)
-    pdf.cell(img_w, 3, "Front", align="C")
+    pdf.cell(img_w, 4, "Front", align="C")
     pdf.set_x(x2)
-    pdf.cell(img_w, 3, "Back", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(img_w, 4, "Back", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
 
-    def draw_copy(label):
-        """Draw one compact receipt block."""
+    # Horizontal rule under IDs
+    y = pdf.get_y()
+    pdf.set_draw_color(40, 40, 40)
+    pdf.set_line_width(0.3)
+    pdf.line(left, y, left + page_w, y)
+    pdf.ln(3)
+
+    id_section_end = pdf.get_y()
+    footer_h = 6
+    copies_area_top = id_section_end
+    copies_area_bottom = usable_bottom - footer_h
+    copies_area_h = copies_area_bottom - copies_area_top
+
+    # 3 equal copy blocks + 2 thin separators
+    sep_h = 4
+    block_h = (copies_area_h - 2 * sep_h) / 3
+
+    def draw_separator():
+        y = pdf.get_y()
+        pdf.set_draw_color(120, 120, 120)
+        pdf.set_line_width(0.25)
+        for x in range(int(left), int(left + page_w), 4):
+            pdf.line(x, y + sep_h / 2, min(x + 2, left + page_w), y + sep_h / 2)
+        pdf.set_y(y + sep_h)
+
+    def draw_copy(label, target_h):
         start_y = pdf.get_y()
         pdf.set_draw_color(26, 122, 58)
-        pdf.set_line_width(0.4)
+        pdf.set_line_width(0.5)
+        pdf.rect(left, start_y, page_w, target_h)
 
-        # Outer box height estimate ~42mm
-        box_h = 42
-        pdf.rect(8, start_y, page_w, box_h)
+        # Header
+        pdf.set_xy(left + 3, start_y + 3)
+        pdf.set_font("Helvetica", "B", 8.5)
+        pdf.cell(125, 4, "MINISTRY OF AGRICULTURE - PRODUCT DISTRIBUTION PROGRAM")
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(0, 4, label, align="R", new_x="LMARGIN", new_y="NEXT")
 
-        pdf.set_xy(10, start_y + 2)
-        pdf.set_font("Helvetica", "B", 7.5)
-        pdf.cell(120, 3.5, "MINISTRY OF AGRICULTURE - PRODUCT DISTRIBUTION PROGRAM")
-        pdf.set_font("Helvetica", "B", 8)
-        pdf.cell(0, 3.5, label, align="R", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_x(left + 3)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.cell(125, 4, "CHEBANGO TEA FACTORY")
+        pdf.cell(0, 4, f"Receipt No: {r['receipt_no']}", align="R", new_x="LMARGIN", new_y="NEXT")
 
-        pdf.set_x(10)
-        pdf.set_font("Helvetica", "", 7)
-        pdf.cell(120, 3, "CHEBANGO TEA FACTORY")
-        pdf.cell(0, 3, f"Receipt No: {r['receipt_no']}", align="R", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_x(left + 3)
+        pdf.cell(0, 4, f"Date: {r['date_str']}", align="R", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
 
-        pdf.set_x(10)
-        pdf.cell(0, 3, f"Date: {r['date_str']}", align="R", new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(1)
-
-        # Details — Received By = farmer, Phone = farmer mobile
+        # Details — Received By & Phone left BLANK for handwriting
         rows = [
             ("Farmer Name:", r["farmer_name"]),
             ("ID Number:", r["id_number"]),
             ("Grower Number:", r["grower_number"]),
             ("Product(s):", r["product"]),
             ("Total Quantity:", str(r["quantity"])),
-            ("Received By:", r["farmer_name"]),
-            ("Phone:", r["mobile"]),
+            ("Received By:", ""),   # blank — farmer writes
+            ("Phone:", ""),         # blank — farmer writes
         ]
-        pdf.set_font("Helvetica", "", 7.5)
+        line_h = 4.2
         for label_t, val in rows:
-            pdf.set_x(12)
-            pdf.set_font("Helvetica", "B", 7.5)
-            pdf.cell(32, 3.2, label_t)
-            pdf.set_font("Helvetica", "", 7.5)
-            # Truncate long product lines
-            text = str(val)
-            if len(text) > 70:
-                text = text[:67] + "..."
-            pdf.cell(0, 3.2, text, new_x="LMARGIN", new_y="NEXT")
+            pdf.set_x(left + 5)
+            pdf.set_font("Helvetica", "B", 8.5)
+            pdf.cell(36, line_h, label_t)
+            pdf.set_font("Helvetica", "", 8.5)
+            text = str(val) if val else ""
+            if len(text) > 75:
+                text = text[:72] + "..."
+            # Underline blank fields so it's clear they should be filled
+            if not val:
+                x_line = pdf.get_x()
+                y_line = pdf.get_y() + line_h - 1
+                pdf.cell(0, line_h, "", new_x="LMARGIN", new_y="NEXT")
+                pdf.set_draw_color(80, 80, 80)
+                pdf.set_line_width(0.2)
+                pdf.line(x_line, y_line, left + page_w - 8, y_line)
+            else:
+                pdf.cell(0, line_h, text, new_x="LMARGIN", new_y="NEXT")
 
-        # Signature lines
-        sig_y = start_y + box_h - 8
-        pdf.set_draw_color(50, 50, 50)
-        pdf.set_line_width(0.2)
-        pdf.line(18, sig_y, 80, sig_y)
-        pdf.line(120, sig_y, 185, sig_y)
-        pdf.set_xy(18, sig_y + 1)
-        pdf.set_font("Helvetica", "", 6.5)
-        pdf.cell(62, 3, "Recipient Signature", align="C")
-        pdf.set_xy(120, sig_y + 1)
-        pdf.cell(65, 3, "Authorized Officer", align="C")
+        # Signature area near bottom of this block
+        sig_y = start_y + target_h - 14
+        pdf.set_draw_color(40, 40, 40)
+        pdf.set_line_width(0.3)
+        # Farmer signature line (longer space)
+        pdf.line(left + 10, sig_y, left + 95, sig_y)
+        # Officer signature line
+        pdf.line(left + 110, sig_y, left + page_w - 10, sig_y)
 
-        pdf.set_y(start_y + box_h + 2)
+        pdf.set_xy(left + 10, sig_y + 1.5)
+        pdf.set_font("Helvetica", "", 7.5)
+        pdf.cell(85, 4, "Farmer / Recipient Signature", align="C")
+        pdf.set_xy(left + 110, sig_y + 1.5)
+        pdf.cell(page_w - 120, 4, "Authorized Officer Signature", align="C")
 
-    draw_copy("STORE RECEIPT")
-    # dashed separator
-    pdf.set_draw_color(100, 100, 100)
-    y = pdf.get_y()
-    for x in range(10, 200, 4):
-        pdf.line(x, y, x + 2, y)
-    pdf.ln(3)
+        pdf.set_y(start_y + target_h)
 
-    draw_copy("GATE COPY")
-    y = pdf.get_y()
-    for x in range(10, 200, 4):
-        pdf.line(x, y, x + 2, y)
-    pdf.ln(3)
+    draw_copy("STORE RECEIPT", block_h)
+    draw_separator()
+    draw_copy("GATE COPY", block_h)
+    draw_separator()
+    draw_copy("FARMER COPY", block_h)
 
-    draw_copy("FARMER COPY")
-
-    pdf.set_y(pdf.get_y() + 1)
-    pdf.set_font("Helvetica", "I", 6.5)
-    pdf.set_text_color(80, 80, 80)
-    pdf.cell(0, 3, "This receipt number is traceable and secured. Keep the duplicate copy for your records.", align="C")
+    # Footer pinned near bottom of page
+    pdf.set_y(usable_bottom - 4)
+    pdf.set_font("Helvetica", "I", 7)
+    pdf.set_text_color(70, 70, 70)
+    pdf.cell(0, 4, "This receipt number is traceable and secured. Keep the duplicate copy for your records.", align="C")
+    pdf.set_text_color(0, 0, 0)
 
     buf = BytesIO()
     pdf.output(buf)
@@ -1147,8 +1179,8 @@ def render_professional_receipt_preview(r):
         <tr><td class="label">Grower Number:</td><td>{r['grower_number']}</td></tr>
         <tr><td class="label">Product(s):</td><td>{r['product']}</td></tr>
         <tr><td class="label">Total Quantity:</td><td><b>{r['quantity']}</b></td></tr>
-        <tr><td class="label">Received By:</td><td>{r['farmer_name']}</td></tr>
-        <tr><td class="label">Phone:</td><td>{r['mobile']}</td></tr>
+        <tr><td class="label">Received By:</td><td style="border-bottom:1px solid #333; min-width:180px;">&nbsp;</td></tr>
+        <tr><td class="label">Phone:</td><td style="border-bottom:1px solid #333; min-width:180px;">&nbsp;</td></tr>
     """
 
     def block(copy_label):
@@ -1167,8 +1199,8 @@ def render_professional_receipt_preview(r):
             </div>
             <table>{details}</table>
             <div class="signatures">
-                <div class="sign-box">Recipient Signature</div>
-                <div class="sign-box">Authorized Officer</div>
+                <div class="sign-box">Farmer / Recipient Signature</div>
+                <div class="sign-box">Authorized Officer Signature</div>
             </div>
         </div>
         """
