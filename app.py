@@ -216,19 +216,61 @@ def _sync_available(values):
     }
 
 
+def _issued_totals_from_farmers():
+    """Sum Quantity per Product from the farmers table (source of truth for Issued)."""
+    farmers = load_farmers()
+    issued_map = {}
+    if not farmers.empty and "Product" in farmers.columns and "Quantity" in farmers.columns:
+        for product, qty in farmers.groupby("Product")["Quantity"].sum().items():
+            issued_map[str(product)] = int(qty)
+    return issued_map
+
+
 def load_stock():
+    """
+    Load stock from Supabase, then force Issued = sum from Farmers List.
+    Available is always Received − Issued.
+    If the DB Issued value differs, it is corrected and saved so all pages stay in sync.
+    """
     res = supabase.table("stock").select("*").execute()
     rows = res.data or []
     stock = {}
     for r in rows:
-        stock[r["product"]] = _sync_available({
-            "received": r["received"],
-            "issued": r["issued"],
-            "available": r["available"]
-        })
+        stock[r["product"]] = {
+            "received": int(r.get("received") or 0),
+            "issued": int(r.get("issued") or 0),
+            "available": int(r.get("available") or 0),
+        }
     for p in get_all_products():
         if p not in stock:
             stock[p] = {"received": 0, "issued": 0, "available": 0}
+
+    # Source of truth for Issued = Farmers List totals
+    issued_map = _issued_totals_from_farmers()
+    for p, qty in issued_map.items():
+        if p not in stock:
+            stock[p] = {"received": 0, "issued": 0, "available": 0}
+    for p in list(stock.keys()):
+        true_issued = int(issued_map.get(p, 0))
+        received = int(stock[p].get("received") or 0)
+        old_issued = int(stock[p].get("issued") or 0)
+        stock[p] = _sync_available({
+            "received": received,
+            "issued": true_issued,
+            "available": 0,
+        })
+        # Keep DB in sync so Manage Products / manual edits don't drift again
+        if old_issued != true_issued:
+            try:
+                supabase.table("stock").upsert({
+                    "product": p,
+                    "received": stock[p]["received"],
+                    "issued": stock[p]["issued"],
+                    "available": stock[p]["available"],
+                }).execute()
+            except Exception:
+                pass
+
     return stock
 
 
