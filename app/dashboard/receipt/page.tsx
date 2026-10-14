@@ -1,11 +1,11 @@
 "use client"
-export const dynamic = 'force-dynamic'
-import { useEffect, useState } from "react"
+
+import { Suspense, useEffect, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import Link from "next/link"
 import { createClient } from "@/lib/supabase/client"
 
-export default function ReceiptPage() {
+function ReceiptContent() {
   const [user, setUser] = useState<any>(null)
   const [receiptData, setReceiptData] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -63,7 +63,7 @@ export default function ReceiptPage() {
   return (
     <div className="min-h-screen bg-[#f4f1e8]">
       <div className="flex">
-        {/* Sidebar - hidden when printing */}
+        {/* Sidebar */}
         <aside className="w-64 min-h-screen bg-[#1b4332] text-white p-6 flex flex-col print:hidden">
           <div className="mb-8">
             <h2 className="text-2xl font-bold text-green-400">Chebango</h2>
@@ -112,7 +112,7 @@ export default function ReceiptPage() {
               No receipt selected. Please issue products first.
             </div>
           ) : (
-            <div className="bg-white rounded-xl shadow-lg p-8 max-w-3xl mx-auto print:shadow-none print:p-4">
+            <div className="bg-white rounded-xl shadow-lg p-8 max-w-3xl mx-auto print:shadow-none">
               {/* Header */}
               <div className="text-center border-b-2 border-green-700 pb-4 mb-6">
                 <h2 className="text-xl font-bold text-[#1b4332]">
@@ -188,5 +188,17 @@ export default function ReceiptPage() {
         </main>
       </div>
     </div>
+  )
+}
+
+export default function ReceiptPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-[#1b4332] flex items-center justify-center text-white">
+        Loading receipt...
+      </div>
+    }>
+      <ReceiptContent />
+    </Suspense>
   )
 }
